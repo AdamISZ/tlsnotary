@@ -1,0 +1,71 @@
+	
+    **How to build patched NSS dlls on Windows for insertion into an existing instance of Firefox**
+
+    Done on Windows 7. May work on XP - needs research.
+    
+    First, grab the tlsnotary nss patch files at: https://github.com/themighty1/tlsnotary/blob/master/data/gitian/ssl3con.patch and
+    https://github.com/themighty1/tlsnotary/blob/master/data/gitian/pkcs11c.patch for whatever commit you're working on (!!EDIT: please see Update 3 for an important gotcha).
+
+    The main instructions for setting up a Windows build are at: https://developer.mozilla.org/en-US/docs/Mozilla/Developer_guide/Build_Instructions/Windows_Prerequisites
+     *Install Windows 7 SDK (this is big - around 140 MB). (not 100% sure if necessary; clearly not appropriate for XP, but read the above link for details).
+     *Install June 2010 DirectX SDK
+     *Afterwards, install Visual C++ 2010 Express Edition (the order of these two is important) (see "Known Issue: DirectX SDK (June 2010) setup and the S1023 error")
+    
+    The above particular combination of tools may not be the only one that works, but it seems to be what Mozilla are recommending, and it's what I've succeeded with for now.
+    
+    Install Mozilla Build from Mozilla.
+     
+    Grab the source of the latest official release of Firefox (see "Update 1" below) (this is also big, around 140 MB I think) and unzip it.
+    
+    Next, apply the NSS patch as described in the two files at the start. You're looking for ssl3con.c in <source install dir>/mozilla-release/security/nss/lib/ssl, and
+    pkcs11c.c in <source install dir>/mozilla-release/security/nss/lib/softokn/pkcs11c.c. Hack with your favourite code editor (or use 'patch').
+     
+    Start Mozilla Build by going into the location you downloaded it and searching for a batch file corresponding to VC++ 2010 (should be start-shell-msvc2010.bat)
+     
+    Create a file called .mozconfig (or similar) in the "mozilla-release" directory of your source download, e.g. I have C:\firefox-29.0-source\mozilla-release\mozconfi.g .
+    In Mozilla build set this environment variable, set MOZCONFIG=(the location of the above mozconfig file)
+    The .mozconfig file should contain a list of parameters as discussed here: https://developer.mozilla.org/en/docs/Configuring_Build_Options.
+     
+    In particular, for a successful build I found that I needed the config settings as described in "Update 2" below.
+     
+    Once all this is done run ./mach build from the mozilla-release directory (again, running under mozilla-build console with the environment variable above set).
+     
+    Build will probably take on the order of 2-3 hours depending on your machine.
+     
+    The binaries are found in mozilla-release/obj-??(stuff)/dist/bin.
+     
+    To apply the patch to an existing instance of Firefox (same release, obviously!), take the files nss3.dll, softokn3.dll, and possibly nss3dbm3.dll and nssckbi.dll from <source install dir>/mozilla-release/obj-??(stuff)/dist/bin and copy them into your normal Firefox directory (C:/Program Files (x86)/Mozilla Firefox/).
+    
+    Lastly, to test correct application, if you are not actually running tlsnotary, you must set the environment variable NSS_PATCH_DIR to anything non null, otherwise https pages won't load.
+
+    If you need to edit the NSS patch and rebuild, my recommendation is to remove the nss3.dll file from obj(stuff)/dist/bin/ and from obf(stuff)/security/nss/build, and then re-run ./mach build from the mozilla release directory (this way you avoid clobber (= make clean) and drastically reduce rebuild time to maybe 15 minutes. A shame but I don't know how to reduce the rebuild time further.
+
+Updates:
+1. Use *exact* firefox source distribution at: https://ftp.mozilla.org/pub/mozilla.org/firefox/releases/29.0/source/ or equivalent for other releases.
+2. Use list of options listed in about:buildconfig under 'Configure arguments' and place them (with ac_add_options prefix) in mozconfig as described above, if necessary removing --enable-warnings-as-errors.
+3. VC++ will not allow variable declarations except at the start of code blocks in C. So the patch as currently listed in the tlsnotary repo will give compile time errors. This can be fixed trivially. It is also necessary to add headers <windows.h> and <io.h> to the top of ssl3con.c. Obviously for the future, if we intend to use this build method, we will modify the patch to accommodate this completely. If anyone wants my modified patch, let me know.
+
+
+(Junk for now:
+earlier config :
+ac_add_options --disable-webgl
+        ac_add_options --disable-tests
+        ac_add_options --disable-gamepad
+        ac_add_options --disable-alsa
+        ac_add_options --disable-jsd
+        ac_add_options --disable-gstreamer
+        ac_add_options --disable-crashreporter
+        ac_add_options --enable-application=browser
+        ac_add_options --disable-websms-backend
+        ac_add_options --disable-accessibility
+        ac_add_options --disable-printing
+        ac_add_options --disable-webrtc
+        ac_add_options --disable-webspeech
+        ac_add_options --disable-directshow
+        ac_add_options --disable-libjpeg-turbo
+        ac_add_options --disable-webapp-runtime
+        ac_add_options --disable-updater
+        ac_add_options --disable-parental-controls
+        ac_add_options --disable-optimize
+        ac_add_options --disable-profilelocking
+)
