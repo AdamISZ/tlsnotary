@@ -1313,14 +1313,24 @@ def start_firefox(FF_to_backend_port):
     global current_sessiondir
     global nss_patch_dir
     
-    #sanity check
-    if os.path.exists(os.path.join(datadir, 'firefoxcopy', 'firefox.exe' if OS=='mswin' else 'firefox')):
-        firefox_exepath = os.path.join(datadir, 'firefoxcopy', 'firefox.exe' if OS=='mswin' else 'firefox')
+    #sanity check    
+    if OS=='mswin':
+        path_x86 = 'C:/Program Files (x86)/Mozilla Firefox/firefox.exe'
+        path_other = 'C:/Program Files/Mozilla Firefox/firefox.exe'
+        if os.path.exists(path_x86):
+            firefox_exepath = pathx86
+        elif os.path.exists(path_other):
+            firefox_exepath = path_other
+        else:
+            exit(FIREFOX_MISSING)
     else:
-        exit (FIREFOX_MISSING)
- 
-    import stat
-    os.chmod(firefox_exepath,stat.S_IRWXU)
+        if not subprocess.check_output(['which','firefox']):
+            exit(FIREFOX_MISSING)
+        firefox_exepath = 'firefox'
+        #possibly required for some linuces?
+        import stat
+        os.chmod(firefox_exepath,stat.S_IRWXU)
+
     if not os.path.isdir(os.path.join(datadir, 'logs')): os.makedirs(os.path.join(datadir, 'logs'))
     if not os.path.isfile(os.path.join(datadir, 'logs', 'firefox.stdout')): open(os.path.join(datadir, 'logs', 'firefox.stdout'), 'w').close()
     if not os.path.isfile(os.path.join(datadir, 'logs', 'firefox.stderr')): open(os.path.join(datadir, 'logs', 'firefox.stderr'), 'w').close()
@@ -1461,79 +1471,6 @@ if __name__ == "__main__":
     from pyasn1.type import univ
     from pyasn1.codec.der import encoder, decoder    
     
-    #On first run, make sure that torbrowser installfile is in the same directory and extract it
-    if not os.path.exists(os.path.join(datadir, 'firefoxcopy')):
-        print ('Extracting Firefox ...')
-        if OS=='linux':
-            #github doesn't allow to upload .tar.xz, so we add extension now
-            if platform.machine() == 'x86_64':
-                zipname = 'firefox-linux64'
-            else:
-                zipname = 'firefox-linux32'
-            fullpath = os.path.join(installdir, zipname)
-            if os.path.exists(fullpath): 
-                os.rename(fullpath, fullpath + ".tar.xz")
-            elif not os.path.exists(fullpath + ".tar.xz"):
-                print ('Couldn\'t find either '+zipname+' or '+zipname+'.tar.xz'+' Make sure one of them is located in the installdir')
-                exit (CANT_FIND_TORBROWSER)            
-            torbrowser_zip_path = fullpath + '.tar.xz'              
-            try:
-                subprocess.check_output(['xz', '-d', '-k', torbrowser_zip_path]) #extract and keep the sourcefile
-            except:
-                print ('Could not extract ' + torbrowser_zip_path + '.Make sure xz is installed on your system')
-                exit (CANT_FIND_XZ)
-            #by default the result of the extraction will be tor-browser-linux32-3.5.2.1_en-US.tar
-            if platform.machine() == 'x86_64':
-                tarball_path = os.path.join(installdir, 'firefox-linux64.tar')
-            else:
-                tarball_path = os.path.join(installdir, 'firefox-linux32.tar')
-            tbbtar = tarfile.open(tarball_path)
-            #tarball extracts into current working dir
-            os.mkdir(os.path.join(datadir, 'tmpextract'))
-            os.chdir(os.path.join(datadir, 'tmpextract'))
-            tbbtar.extractall()
-            tbbtar.close()
-            os.remove(tarball_path)
-            #change working dir away from the deleted one, otherwise FF will not start
-            os.chdir(datadir)
-            shutil.copytree(os.path.join(datadir, 'tmpextract', 'tor-browser_en-US', 'Browser'), os.path.join(datadir, 'firefoxcopy'))
-            shutil.rmtree(os.path.join(datadir, 'tmpextract'))
-            
-        if OS=='mswin':
-            exename = 'firefox-windows'
-            tbbinstaller_exe_path = os.path.join(installdir, exename)
-            if not os.path.exists(tbbinstaller_exe_path):
-                print ('Couldn\'t find '+exename+' Make sure it is located in the installdir')
-                exit (CANT_FIND_TORBROWSER)
-            os.chdir(installdir) #installer silently extract into the current working dir
-            tbbinstaller_proc = subprocess.Popen(tbbinstaller_exe_path + ' /S' + ' /D='+os.path.join(datadir, 'tmpextract')) #silently extract into destination
-            bInstallerFinished = False
-            for i in range(30): #give the installer 30 secs to extract the files and exit
-                if tbbinstaller_proc.poll() != None:
-                    bInstallerFinished = True
-                    break
-                else:
-                    time.sleep(1)
-            if not bInstallerFinished:
-                print ('Tor Browser Bundle installer was taking too long to extract the files')
-                exit (TBB_INSTALLER_TOO_LONG)
-            #Copy the extracted files into the data folder and delete the extracted files to keep datadir organized
-            shutil.copytree(os.path.join(datadir, 'tmpextract', 'Browser'), os.path.join(datadir, 'firefoxcopy'))
-            shutil.rmtree(os.path.join(datadir, 'tmpextract'))
-               
-        if OS=='macos':
-            zipname = 'TorBrowserBundle-3.5.2.1-osx32_en-US.zip'
-            if os.path.exists(os.path.join(installdir, zipname)):
-                torbrowser_zip_path = os.path.join(installdir, zipname)
-            else:
-                print ('Couldn\'t find '+zipname+' Make sure it is located in the installdir')
-                exit (CANT_FIND_TORBROWSER)
-                tbbzip = zipfile.ZipFile(torbrowser_zip_path, 'r')
-                tbbzip.extractall(os.path.join(datadir, 'tmpextract'))
-                #files get extracted in a root dir Browser
-                shutil.copytree(os.path.join(datadir, 'tmpextract', 'TorBrowserBundle_en-US.app', 'Contents', 'MacOS', 'TorBrowser.app', 'Contents', 'MacOS'), os.path.join(datadir, 'firefoxcopy'))
-                shutil.rmtree(os.path.join(datadir, 'tmpextract'))
-
     if OS=='linux': tshark_exepath = 'tshark'
     elif OS=='mswin':
         if os.path.isfile(os.path.join(os.getenv('programfiles'), "Wireshark",  "tshark.exe" )): 
