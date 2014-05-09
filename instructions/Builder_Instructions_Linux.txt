@@ -1,0 +1,46 @@
+** Instructions for Building the NSS patched libraries for tlsnotary on Linux **
+
+The following has been done on Ubuntu 1204 LTS. There are no guarantees for other distros, although it seems likely it will work.
+
+Unlike for Windows, the Linux packaging of Firefox uses the base distribution of NSS without any complex optimizations or bundling, and so it is not necessary to rebuild the browser.
+
+The instructions here are simple, and are based on https://developer.mozilla.org/en-US/docs/Mozilla/Projects/NSS/NSS_Sources_Building_Testing.
+
+If you want the latest version of NSS, you can just install mercurial (apt-get install mercurial) and run hg clone. However, if you are targetting a specific Firefox release, this may not give you the correct version.
+
+You need to get the correct NSS source code for your target Firefox version. For Firefox 29.0, this is NSS 3.16.
+The NSS releases are hosted on the Mozilla FTP server: ftp://ftp.mozilla.org/pub/mozilla.org/security/nss/releases/
+
+Scanning this list, you can see NSS_3_16_RTM - choose it, and then download the .tar.gz of the source including nspr. Specifically, this is: ftp://ftp.mozilla.org/pub/mozilla.org/security/nss/releases/NSS_3_16_RTM/src/nss-3.16-with-nspr-4.10.4.tar.gz
+
+After untarring (tar xvf) you will have a directory structure with nss/ and nspr/ at the same level.
+
+You should now apply the patches as found in data/gitian to the two files: ssl3con.c and pkcs11c.c, found under nss/lib/ssl/ and nss/lib/softokn/ respectively. Apply the patches by using `patch` or by editing.
+
+Now you are ready to build. Export the environment variables BUILD_OPT=1 (optional, otherwise you will including debugging symbols) and USE_64=1 (the latter only for a 64 bit machine). Then do:
+cd nss
+make nss_build_all
+
+The initial build shouldn't take longer than a few minutes on a reasonably fast machine.
+
+(Any examples of build problems and their fixes will be added here).
+
+The binaries you are looking for are in nss/lib/softoken/Linux3.8_x86_64_glibc_PTH_64_OPT.OBJ (or similar)/libsoftokn3.so, nss/lib/sqlite/Linux3.8_x86_64_glibc_PTH_64_OPT.OBJ/libsqlite3.so and nss/lib/ssl/Linux3.8_x86_64_glibc_PTH_64_OPT.OBJ/libssl3.so.
+
+*BACK UP* the 3 files /usr/lib/firefox/libsqlite3.so, libssl3.so and libsoftokn3.so somewhere.
+
+Shut down Firefox if you have it open.
+
+sudo cp the 3 newly built *.so files in the directories mentioned, into /usr/lib/firefox/.
+
+**Test the validity of the build without tlsnotary**:
+To find out if your libs 'play nice' with your Firefox, run from a terminal:
+
+LD_LIBRARY_PATH=/usr/lib/firefox/ NSS_PATCH_DIR=/home/username/ firefox
+
+In particular, check that you can browse to ssl websites using an RSA ciphersuite. If you're not sure how to find such a site, go to about:config, type `ssl3` in the search bar, and switch to false all cipher suites except security.ssl3.rsa_aes_128_sha, security.ssl3.rsa_aes_256_sha, security.ssl3.rsa_rc4_128_md5, security.ssl3.rsa_rc4_128_sha. This will ensure that sites can only use RSA for encryption. If you see an ssl error 'feature not supported for version', it almost certainly means you forgot to set the NSS_PATCH_DIR environment variable (it can be any valid writeable directory).
+
+If the test is successful, the last thing to do is to run the tlsnotary-auditee.py (the version in *this* repo, not the parent repo) and see if it can complete an audit successfully. 
+
+Verify the build: cross check your created binary against the signed version in the repo. (TODO: how likely is it that different builders can get a match here?).
+
