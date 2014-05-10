@@ -1,2 +1,0 @@
-This fork is an investigation of running the tlsnotary project without installing a modified browser built via the gitian process, but only by patching the NSS libraries.
-For all details about tlsnotary's core operation, see the parent project.
