@@ -6,7 +6,7 @@ Step 2: Shut down Firefox and make sure no Firefox process is running.
 
 Step 3: Check that you have a /usr/lib/firefox/ directory, containing the file libssl3.so. If not, this patch will not work without further edits to the script (assuming it works at all). In this directory, copy the two files libssl3.so and libsoftokn3.so to some other backup directory.
 
-Step 4: Go into dir1\tlsnotary\data\libraries\ and find the THREE files libssl3.so, libsoftokn3.so and libsqlite3.so. Verify the gpg signatures using "gpg --verify <libname>.asc <libname>" (you need to install gpg of course). The signature should correspond to key ID E9A3197A.
+Step 4: Go into dir1/tlsnotary/data/libraries/ and find the THREE files libssl3.so, libsoftokn3.so and libsqlite3.so. Verify the gpg signatures using "gpg --verify <libname>.asc <libname>" (you need to install gpg of course). The signature should correspond to key ID E9A3197A.
 
 Step 5: Once the signatures are verified, use sudo to copy these three files into /usr/lib/firefox/.
 
