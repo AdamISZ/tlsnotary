@@ -1374,6 +1374,8 @@ def start_firefox(FF_to_backend_port):
     current_sessiondir = os.path.join(sessionsdir, time_str)
     os.makedirs(current_sessiondir)
 
+    if (OS=='linux'): os.putenv('LD_LIBRARY_PATH','/usr/lib/firefox/')
+
     os.putenv("FF_to_backend_port", str(FF_to_backend_port))
     os.putenv("FF_first_window", "true")   #prevents extension's confusion when websites open multiple FF windows
     nss_patch_dir = os.path.join(current_sessiondir, 'nsspatchdir')
@@ -1473,10 +1475,11 @@ if __name__ == "__main__":
     
     if OS=='linux': tshark_exepath = 'tshark'
     elif OS=='mswin':
-        if os.path.isfile(os.path.join(os.getenv('programfiles'), "Wireshark",  "tshark.exe" )): 
-            tshark_exepath = os.path.join(os.getenv('programfiles'), "Wireshark",  "tshark.exe" )
-        elif  os.path.isfile(os.path.join(os.getenv('programfiles(x86)'), "Wireshark",  "tshark.exe" )): 
-            tshark_exepath = os.path.join(os.getenv('programfiles(x86)'), "Wireshark",  "tshark.exe" )
+        progfiles = 'C:/Program Files'
+        if os.path.isfile(os.path.join(progfiles, "Wireshark",  "tshark.exe" )):
+            tshark_exepath = os.path.join(progfiles, "Wireshark",  "tshark.exe" )
+        elif  os.path.isfile(os.path.join(progfiles+' (x86)', "Wireshark",  "tshark.exe" )):
+            tshark_exepath = os.path.join(progfiles+' (x86)', "Wireshark",  "tshark.exe" )
         else:
             print ('Please make sure wireshark is installed and in your Program Files location', end='\r\n')
             exit(TSHARK_NOT_FOUND)            
