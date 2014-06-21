@@ -58,8 +58,8 @@ PMS1 = '' #first half of pre-master secret. global because of google check
 md5hmac = '' #used in get_html_paths to construct the full MS after committing to a hash
 bIsStcppipeStarted = False
 cr_list = [] #a list of all client_randoms for recorded pages used by tshark to search for html only in audited tracefiles.
-
-
+auditee_mac_check = False #tmp var
+get_html_paths_retval = None #tmp  var
 
 def import_auditor_pubkey(auditor_pubkey_b64modulus):
     global auditorPubKey                      
@@ -252,6 +252,13 @@ class HandlerClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             with open(shared.config_location,'wb') as f: shared.config.write(f)
             return
         #----------------------------------------------------------------------#
+        if self.path.startswith('/auditee_mac_check'):
+            global auditee_mac_check
+            auditee_mac_check = False
+            while not auditee_mac_check: time.sleep(1) #will be set to True when mac check completes
+            self.respond({'response':'auditee_mac_check', 'status':'success'})
+            return
+        #----------------------------------------------------------------------#        
         else:
             self.respond({'response':'unknown command'})
             return
@@ -804,43 +811,98 @@ def nss_patch_audited_connections():
             break
 
 
-def new_connection_thread(socket_client, new_address):
+def shutdown_sockets(sockets):
+    for one_socket in sockets:
+        try:
+            one_socket.shutdown(socket.SHUT_RDWR)
+            one_socket.close()    
+        except: pass
+
+
+def new_sleep_proxy_connection_thread(socket_client, socket_stcppipe):
+    bDataFromServerSeen = False
+    databuffer = ''
+    last_time_data_was_seen_from_server = 0    
+    while True:
+        rlist, wlist, xlist = select.select((socket_client, socket_stcppipe), (), (socket_client, socket_stcppipe), 1)
+        if len(rlist) == len(wlist) == len(xlist) == 0: #timeout
+            if not bDataFromServerSeen: continue
+            #TODO dont rely on a fixed timeout because on a slow Chinese connection  it may take longer than that
+            #instead every 3 seconds try to decrypt html from the trace and if html is
+            #available then terminate this thread
+            if int(time.time()) - last_time_data_was_seen_from_server < 10: continue
+            #dont send databuf anywhere, the server responce is already in the trace
+            print ('*******************************************************************************Server responded')        
+            shutdown_sockets([socket_client, socket_stcppipe])
+            global auditee_mac_check
+            auditee_mac_check = True            
+            return
+        if len(xlist) > 0:
+            print ('Socket exceptional condition. Terminating connection')
+            shutdown_sockets([socket_client])
+            return
+        if len(rlist) == 0:
+            print ('Python internal socket error: rlist should not be empty. Please investigate. Terminating connection')
+            shutdown_sockets([socket_client])
+            return
+        #else rlist contains socket with data
+        for rsocket in rlist:        
+            try:
+                data = rsocket.recv( 1024*1024 )
+                if not data:  #socket closed
+                    shutdown_sockets([socket_client])
+                    return
+                if rsocket is socket_client:
+                    socket_stcppipe.send(data)
+                    continue
+                elif rsocket is socket_stcppipe:
+                    if bDataFromServerSeen: #this is yet another application data packet
+                        databuffer += data
+                        continue
+                    elif data.count('\x17\x03\x01'): #this is the first appdata packet after the handshake
+                        bDataFromServerSeen = True
+                        databuffer += data
+                        continue
+                    #else not application data but a handshake
+                    socket_client.send(data)
+                    continue                    
+            except Exception, e:
+                print('exception in sleep proxy', e)
+                shutdown_sockets([socket_client])                
+                return
+
+
+def new_connection_thread(socket_client):
     #extract destination address from the http header
     #the header has a form of: CONNECT encrypted.google.com:443 HTTP/1.1 some_other_stuff
     headers_str = socket_client.recv(8192)
     headers = headers_str.split()
     if len(headers) < 2:
         print ('Invalid or empty header received: ' + headers_str)
-        socket_client.shutdown(socket.SHUT_RDWR)
-        socket_client.close()
+        shutdown_sockets([socket_client])
         return
     if headers[0] != 'CONNECT':
         print ('Expected CONNECT in header but got ' + headers[0] + '. Please investigate')
-        socket_client.shutdown(socket.SHUT_RDWR)        
-        socket_client.close()
+        shutdown_sockets([socket_client])
         return
     if headers[1].find(':') == -1:
         print ('Expected colon in the address part of the header but none found. Please investigate')
-        socket_client.shutdown(socket.SHUT_RDWR)        
-        socket_client.close()
+        shutdown_sockets([socket_client])
         return
     split_result = headers[1].split(':')
     if len(split_result) != 2:
         print ('Expected only two values after splitting the header. Please investigate')
-        socket_client.shutdown(socket.SHUT_RDWR)        
-        socket_client.close()
+        shutdown_sockets([socket_client])
         return
     host, port = split_result
     try: int_port = int(port)
     except:
         print ('Port is not a numerical value. Please investigate')
-        socket_client.shutdown(socket.SHUT_RDWR)        
-        socket_client.close()
+        shutdown_sockets([socket_client])
         return
     try: host_ip = socket.gethostbyname(host)
     except: #happens when IP lookup fails for some IP6-only hosts
-        socket_client.shutdown(socket.SHUT_RDWR)        
-        socket_client.close()
+        shutdown_sockets([socket_client])
         return
     socket_target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     socket_target.connect((host_ip, int_port))
@@ -853,24 +915,15 @@ def new_connection_thread(socket_client, new_address):
         rlist, wlist, xlist = select.select((socket_client, socket_target), (), (socket_client, socket_target), 60)
         if len(rlist) == len(wlist) == len(xlist) == 0: #timeout
             print ('Socket 60 second timeout. Terminating connection')
-            socket_client.shutdown(socket.SHUT_RDWR)            
-            socket_client.close()
-            socket_target.shutdown(socket.SHUT_RDWR)            
-            socket_target.close()
+            shutdown_sockets([socket_client, socket_target])
             return
         if len(xlist) > 0:
             print ('Socket exceptional condition. Terminating connection')
-            socket_client.shutdown(socket.SHUT_RDWR)                        
-            socket_client.close()
-            socket_target.shutdown(socket.SHUT_RDWR)                        
-            socket_target.close()
+            shutdown_sockets([socket_client, socket_target])
             return
         if len(rlist) == 0:
             print ('Python internal socket error: rlist should not be empty. Please investigate. Terminating connection')
-            socket_client.shutdown(socket.SHUT_RDWR)                                    
-            socket_client.close()
-            socket_target.shutdown(socket.SHUT_RDWR)                                    
-            socket_target.close()
+            shutdown_sockets([socket_client, socket_target])
             return
         #else rlist contains socket with data
         for rsocket in rlist:
@@ -880,10 +933,7 @@ def new_connection_thread(socket_client, new_address):
                     #XXX Why did select() trigger if there was no data?
                     #this overwhelms CPU big time unless we sleep
                     if int(time.time()) - last_time_data_was_seen > 60: #prevent no-data sockets from looping endlessly
-                        socket_client.shutdown(socket.SHUT_RDWR)
-                        socket_client.close()
-                        socket_target.shutdown(socket.SHUT_RDWR)
-                        socket_target.close()
+                        shutdown_sockets([socket_client, socket_target])
                         return
                     #else timeout seconds of datalessness have not elapsed
                     time.sleep(0.1)
@@ -897,13 +947,33 @@ def new_connection_thread(socket_client, new_address):
                     continue
             except Exception, e:
                 print ('Caught exception', e)
-                socket_client.shutdown(socket.SHUT_RDWR)
-                socket_client.close()
-                socket_target.shutdown(socket.SHUT_RDWR)
-                socket_target.close()
+                shutdown_sockets([socket_client, socket_target])
                 return
-         
-        
+    
+    
+   
+def sleep_proxy_thread(parenthread, FF_proxy_port, stcppipe_in_port):
+    socket_proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try: socket_proxy.bind(('localhost', FF_proxy_port))
+    except: #socket is in use
+        parenthread.retval = 'failure'
+        return
+    parenthread.retval = 'success'
+    print ('sleep proxy is forwarding from port ' + str(FF_proxy_port) + ' to port ' + str(stcppipe_in_port))
+    socket_proxy.listen(5) #5 requests can be queued
+   # while True: accept only 1 connection
+    #block until a new connection appears
+    new_socket, new_address = socket_proxy.accept()
+    print ('new connection  accepted')
+    socket_stcppipe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    socket_stcppipe.connect(('127.0.0.1', stcppipe_in_port))
+    #process only one connection
+    thread = threading.Thread(target= new_sleep_proxy_connection_thread, args=(new_socket, socket_stcppipe))
+    thread.daemon = True
+    thread.start()   
+   
+   
+            
 def https_proxy_thread(parenthread, port):
     socket_proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try: socket_proxy.bind(('localhost', port))
@@ -913,14 +983,15 @@ def https_proxy_thread(parenthread, port):
     parenthread.retval = 'success'    
     print ('HTTPS proxy is serving on port ' + str(port))
     socket_proxy.listen(5) #5 requests can be queued
-    while True:
-        #block until a new connection appears
-        print ('listening for a new connection')
-        new_socket, new_address = socket_proxy.accept()
-        print ('new connection  accepted')
-        thread = threading.Thread(target= new_connection_thread, args=(new_socket, new_address))
-        thread.daemon = True
-        thread.start()
+    auditee_mac_check = True
+    #block until a new connection appears
+    print ('listening for a new connection')
+    new_socket, new_address = socket_proxy.accept()
+    print ('new connection  accepted')
+    #process only one connection
+    thread = threading.Thread(target= new_connection_thread, args=(new_socket,))
+    thread.daemon = True
+    thread.start()
         
 
 def start_recording():
@@ -952,9 +1023,9 @@ def start_recording():
         if platform.architecture()[0] == '64bit':stcppipe_exename = 'stcppipe64_mac'
         else: stcppipe_exename = 'stcppipe_mac'                
     for i in range(3):
-        FF_proxy_port = random.randint(1025,65535)     
+        stcppipe_in_port = random.randint(1025,65535)
         stcppipe_proc = Popen([join(datadir, 'stcppipe', stcppipe_exename),'-d',
-                               logdir, '-b', '127.0.0.1', str(HTTPS_proxy_port), str(FF_proxy_port)])
+                               logdir, '-b', '127.0.0.1', str(HTTPS_proxy_port), str(stcppipe_in_port)])
         time.sleep(1)
         if stcppipe_proc.poll() != None:
             print ('Maybe the port was in use, trying again with a new port')
@@ -963,8 +1034,21 @@ def start_recording():
             bWasStarted = True
             break
     if bWasStarted == False: return ('failure to start stcppipe')
-    print ('stcppipe is piping from port ' + str(FF_proxy_port) + ' to port ' + str(HTTPS_proxy_port))
+    print ('stcppipe is piping from port ' + str(stcppipe_in_port) + ' to port ' + str(HTTPS_proxy_port))
     stcppipe_pid = stcppipe_proc.pid 
+    #start the sleep proxy and make sure the port is not in use
+    bWasStarted = False
+    for i in range(3):
+        FF_proxy_port = random.randint(1025,65535)         
+        thread = shared.ThreadWithRetval(target= sleep_proxy_thread, args=(FF_proxy_port, stcppipe_in_port))
+        thread.daemon = True
+        thread.start()
+        time.sleep(1)
+        if thread.retval != 'success': continue
+        bWasStarted = True
+        break
+    if bWasStarted == False: return ('failure to start sleep proxy')
+    print ('Started sleep proxy on port ' + str(FF_proxy_port))    
     thread = threading.Thread(target= nss_patch_audited_connections)
     thread.daemon = True
     thread.start()

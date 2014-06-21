@@ -2,11 +2,13 @@ var bStartRecordingResponded = false;
 var bStopRecordingResponded = false;
 var bStopPreparePMS = false;
 var bGetHTMLPaths = false;
+var bAuditeeMacCheckResponded = false;
 var bIsRecordingSoftwareStarted = false; //we start the software only once
 var reqStartRecording;
 var reqStopRecording;
 var reqPreparePMS;
 var reqGetHTMLPaths;
+var reqAuditeeMacCheck;
 var port;
 var tab_url_full = "";//full URL at the time when AUDIT* is pressed
 var tab_url = ""; //the URL at the time when AUDIT* is pressed (only the domain part up to the first /)
@@ -20,6 +22,7 @@ var button_spinner;
 var button_stop_enabled;
 var button_stop_disabled;
 var testingMode = false;
+var proxy_port_int;
 
 port = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).get("FF_to_backend_port");
 //setting homepage should be done from here rather than defaults.js in order to have the desired effect. FF's quirk.
@@ -120,11 +123,7 @@ function responseStartRecording(iteration){
 	//else successful response
 	bIsRecordingSoftwareStarted = true;
 	var proxy_port = reqStartRecording.getResponseHeader("proxy_port");
-	var prefs = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService);
-	var port_int = parseInt(proxy_port);
-	prefs.setIntPref("network.proxy.type", 1);
-	prefs.setCharPref("network.proxy.ssl","127.0.0.1");
-	prefs.setIntPref("network.proxy.ssl_port", port_int);
+	proxy_port_int = parseInt(proxy_port);
 	preparePMS();
 }
 
@@ -162,12 +161,17 @@ function responsePreparePMS(iteration){
 		return;
 	}
 	//else success preparing PMS, resume page reload
+	auditeeMacCheck();
 	help.value = "Waiting for the page to reload fully"
 	//don't reuse TLS sessions
 	var sdr = Cc["@mozilla.org/security/sdr;1"].getService(Ci.nsISecretDecoderRing);
 	sdr.logoutAndTeardown();
 	observer.register();
-	audited_browser.addProgressListener(loadListener);
+	//audited_browser.addProgressListener(loadListener);
+	var prefs = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService);
+	prefs.setIntPref("network.proxy.type", 1);
+	prefs.setCharPref("network.proxy.ssl","127.0.0.1");
+	prefs.setIntPref("network.proxy.ssl_port", proxy_port_int);
 	audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
 	makeSureReloadDoesntTakeForever(0);
 }
@@ -189,12 +193,20 @@ function myObserver() {}
 myObserver.prototype = {
   observe: function(aSubject, topic, data) {
 	 var httpChannel = aSubject.QueryInterface(Ci.nsIHttpChannel);
-	 var url = httpChannel.URI.spec; 
-	 if (url == tab_url_full) {
-		observer.unregister();
-		Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).set("NSS_PATCH_STAGE_ONE", "true");
-		console.log("nss patch toggled");
-	}
+	 var url = httpChannel.URI.spec;
+	 if (url.startsWith("http://127.0.0.1:")) return;
+	 else if (url != tab_url_full) {
+		 //drop all random request which dont match the urlbar, however dont touch
+		 //localhost requests to the backend
+		console.log("cancelled url: " + url);
+		aSubject.cancel(Components.results.NS_BINDING_ABORTED);
+		return;
+	 }
+	 //else url matched
+	 console.log("allowed url: " + url);
+	 observer.unregister();
+	 Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).set("NSS_PATCH_STAGE_ONE", "true");
+	 console.log("nss patch toggled");
   },
   register: function() {
     var observerService = Cc["@mozilla.org/observer-service;1"].getService(Ci.nsIObserverService);
@@ -230,6 +242,32 @@ var loadListener = {
 }
 
 
+function auditeeMacCheck(){
+	reqAuditeeMacCheck = new XMLHttpRequest();
+    reqAuditeeMacCheck.onload = responseAuditeeMacCheck;
+    reqAuditeeMacCheck.open("HEAD", "http://127.0.0.1:"+port+"/auditee_mac_check", true);
+    reqAuditeeMacCheck.send();
+    responseAuditeeMacCheck(0);		
+    //TODO: handle response
+}
+
+
+function responseAuditeeMacCheck(iteration){
+	if (typeof iteration == "number"){
+        if (iteration > 60){
+			help.value = "auditee mac check error";
+            return;
+        }
+        if (!bAuditeeMacCheckResponded) setTimeout(responseAuditeeMacCheck, 1000, ++iteration)
+        return;
+    }
+    //else: not a timeout but a response from my backend server
+	bAuditeeMacCheckResponded = true;
+	//audited_browser.stop();	
+	get_html_paths();
+}
+
+
 //get paths to decrypted html files on local filesystem and show the html
 function get_html_paths(){
 	reqGetHTMLPaths = new XMLHttpRequest();
@@ -253,7 +291,7 @@ function toggleOffline(){
 
 function responseGetHTMLPaths(iteration){
     if (typeof iteration == "number"){
-        if (iteration > 10){
+        if (iteration > 20){
 			help.value = "ERROR responseGetHTMLPaths timed out";
             return;
         }
