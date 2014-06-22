@@ -201,6 +201,7 @@ class HandlerClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             return      
         #----------------------------------------------------------------------#
         if self.path.startswith('/get_html_paths'):
+
             b64_paths = ''            
             arg_str = self.path.split('?', 1)[1]
             if not arg_str.startswith('domain='):
@@ -209,10 +210,22 @@ class HandlerClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             #else
             b64domain = arg_str[len('pubkey='):]
             domain = b64decode(b64domain)
-            rv = get_html_paths(domain)
+            #the html paths were calculated earlier, as soon as the
+            #connection was shut down:
+            rv = get_html_paths_retval
+
+            #commit the domain into the commit directory defined by the last cr (should be only one):
+            commit_dir = join(current_sessiondir, 'commit')
+            if not os.path.exists(commit_dir):
+                raise Exception('Commit directory missing when trying to write domain file')
+            domain_path = join(commit_dir, 'domain'+ str(len(cr_list)))
+            with open(domain_path, 'wb') as f: f.write(domain)
+
             if rv[0] == 'success': b64_paths = b64encode(rv[1])
             status = 'success' if rv[0] == 'success' else rv[1]
             self.respond({'response':'get_html_paths', 'status':status, 'html_paths':b64_paths})
+
+            #self.respond({'response':'get_html_paths','status':'success','html_paths':'xxx'})
             return                  
         #----------------------------------------------------------------------#
         if self.path.startswith('/selftest'):
@@ -263,8 +276,17 @@ class HandlerClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             self.respond({'response':'unknown command'})
             return
 
+#given a client random (or any bin data) and a directory
+#return the name of any file that contains that data
+def find_trace_file_for_cr(crx,dirx):
+    tracelog_files = os.listdir(dirx)
+    for one_trace in tracelog_files:
+        with open(join(tracelog_dir, one_trace), 'rb') as f: data=f.read()
+        if data.count(cr) == 1: return one_trace
+    raise Exception ('Client random not found in trace files')
 
-def get_html_paths(domain):
+
+def get_html_paths():
     #there is an edge case when the request fails to trigger the nss patch, e.g. https://github.com/angular/angular.js
     #FIXME: find a more elegant way to handle such a scenario
     if not hasattr(get_html_paths, 'prev_cr'):
@@ -285,16 +307,15 @@ def get_html_paths(domain):
         if not data.count(cr) == 1: continue
         #else client random found
         bFoundCR = True
-        break 
+        break
     if not bFoundCR: raise Exception ('Client random not found in trace files')
-    #copy the tracefile to a new location, b/c stcppipe may still be appending it 
+    #copy the tracefile to a new location, b/c stcppipe may still be appending it
     commit_dir = join(current_sessiondir, 'commit')
     if not os.path.exists(commit_dir): os.makedirs(commit_dir)
     tracecopy_path = join(commit_dir, 'trace'+ str(len(cr_list)) )
     md5hmac_path = join(commit_dir, 'md5hmac'+ str(len(cr_list)) )
     with open(md5hmac_path, 'wb') as f: f.write(md5hmac)
-    domain_path = join(commit_dir, 'domain'+ str(len(cr_list)) )
-    with open(domain_path, 'wb') as f: f.write(domain)    
+    #copy the tracefile to a new location, b/c stcppipe may still be appending it
     shutil.copyfile(join(tracelog_dir, one_trace), tracecopy_path)
     #Remove the data from the auditee to the auditor (except handshake) from the copied
     #trace using editcap. (To address the small possibility of data leakage from request urls)
@@ -375,8 +396,10 @@ def get_html_paths(domain):
         html = shared.get_html_from_asciidump(oneframe)
         path = join(commit_dir, 'html-' + str(len(cr_list)) + '-' + str(index))
         with open(path, 'wb') as f: f.write(html)
-        html_paths += path + '&'    
-    return ('success', html_paths)
+        html_paths += path + '&'
+    global get_html_paths_retval
+    get_html_paths_retval = ('success',html_paths)
+    return get_html_paths_retval
     
     
 
@@ -818,7 +841,6 @@ def shutdown_sockets(sockets):
             one_socket.close()    
         except: pass
 
-
 def new_sleep_proxy_connection_thread(socket_client, socket_stcppipe):
     bDataFromServerSeen = False
     databuffer = ''
@@ -834,8 +856,12 @@ def new_sleep_proxy_connection_thread(socket_client, socket_stcppipe):
             #dont send databuf anywhere, the server responce is already in the trace
             print ('*******************************************************************************Server responded')        
             shutdown_sockets([socket_client, socket_stcppipe])
+            rv = get_html_paths()
+            if not rv[0]=='success':
+                raise Exception('Decryption failed in sleep proxy')
+
             global auditee_mac_check
-            auditee_mac_check = True            
+            auditee_mac_check = True
             return
         if len(xlist) > 0:
             print ('Socket exceptional condition. Terminating connection')

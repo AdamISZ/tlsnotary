@@ -28,7 +28,7 @@ port = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).ge
 //setting homepage should be done from here rather than defaults.js in order to have the desired effect. FF's quirk.
 Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService).getBranch("browser.startup.").setCharPref("homepage", "chrome://tlsnotary/content/auditee.html");
 //TODO: the pref  below must be set from here rather than defaults.js because Firefox overrides them on startup
-Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService).getBranch("network.proxy.").setIntPref("type", 0);
+toggleProxy(false);
 Components.utils.import("resource://gre/modules/PopupNotifications.jsm");
 
 
@@ -122,7 +122,7 @@ function responseStartRecording(iteration){
 	}
 	//else successful response
 	bIsRecordingSoftwareStarted = true;
-	var proxy_port = reqStartRecording.getResponseHeader("proxy_port");
+    var proxy_port = reqStartRecording.getResponseHeader("proxy_port");
 	proxy_port_int = parseInt(proxy_port);
 	preparePMS();
 }
@@ -161,17 +161,14 @@ function responsePreparePMS(iteration){
 		return;
 	}
 	//else success preparing PMS, resume page reload
-	auditeeMacCheck();
+    auditeeMacCheck();
 	help.value = "Waiting for the page to reload fully"
 	//don't reuse TLS sessions
 	var sdr = Cc["@mozilla.org/security/sdr;1"].getService(Ci.nsISecretDecoderRing);
 	sdr.logoutAndTeardown();
 	observer.register();
 	//audited_browser.addProgressListener(loadListener);
-	var prefs = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService);
-	prefs.setIntPref("network.proxy.type", 1);
-	prefs.setCharPref("network.proxy.ssl","127.0.0.1");
-	prefs.setIntPref("network.proxy.ssl_port", proxy_port_int);
+    toggleProxy(true);
 	audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
 	makeSureReloadDoesntTakeForever(0);
 }
@@ -243,28 +240,28 @@ var loadListener = {
 
 
 function auditeeMacCheck(){
-	reqAuditeeMacCheck = new XMLHttpRequest();
+    reqAuditeeMacCheck = new XMLHttpRequest();
     reqAuditeeMacCheck.onload = responseAuditeeMacCheck;
     reqAuditeeMacCheck.open("HEAD", "http://127.0.0.1:"+port+"/auditee_mac_check", true);
     reqAuditeeMacCheck.send();
-    responseAuditeeMacCheck(0);		
+    //responseAuditeeMacCheck(0);
     //TODO: handle response
 }
 
 
 function responseAuditeeMacCheck(iteration){
-	if (typeof iteration == "number"){
+    if (typeof iteration == "number"){
         if (iteration > 60){
-			help.value = "auditee mac check error";
-            return;
+            help.value = "auditee mac check error";
+           return;
         }
         if (!bAuditeeMacCheckResponded) setTimeout(responseAuditeeMacCheck, 1000, ++iteration)
         return;
     }
     //else: not a timeout but a response from my backend server
-	bAuditeeMacCheckResponded = true;
+    bAuditeeMacCheckResponded = true;
 	//audited_browser.stop();	
-	get_html_paths();
+    get_html_paths();
 }
 
 
@@ -277,17 +274,6 @@ function get_html_paths(){
     reqGetHTMLPaths.send();
     responseGetHTMLPaths(0);	
 }
-
-//NB: FF ignores offline mode when proxy is set to manual
-function toggleOffline(){
-	var curvalue = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService).getBranch("network.proxy.").getIntPref("type");
-	var newvalue;
-	if (curvalue == 0) newvalue = 1;
-	if (curvalue == 1) newvalue = 0;
-	Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService).getBranch("network.proxy.").setIntPref("type", newvalue);
-	BrowserOffline.toggleOfflineStatus(); //analogous to toggling "Work Offline" in File menu
-}
-
 
 function responseGetHTMLPaths(iteration){
     if (typeof iteration == "number"){
@@ -319,28 +305,43 @@ function responseGetHTMLPaths(iteration){
 		return;
 	}
 	//else successful response
-	b64_html_paths = reqGetHTMLPaths.getResponseHeader("html_paths");
-	html_paths_string = atob(b64_html_paths);
-	html_paths = html_paths_string.split("&");
-	toggleOffline();
-	for (var i=0; i<html_paths.length; i++){
-		if (html_paths[i] == "") continue;
-		let browser = gBrowser.addTab(html_paths[i]);
-	}
-	//FIXME: we should install a pageload listener here rather than relying on timeout
-	setTimeout(toggleOffline, 1000);
+    b64_html_paths = reqGetHTMLPaths.getResponseHeader("html_paths");
+    html_paths_string = atob(b64_html_paths);
+    html_paths = html_paths_string.split("&");
+    for (var i=0; i<html_paths.length; i++){
+        if (html_paths[i] == "") continue;
+        let browser = gBrowser.addTab(html_paths[i]);
+    }
+
 	help.value = "Page decryption successful. Go to another page and press AUDIT THIS PAGE or press FINISH";
 	button_record_enabled.hidden = false;
 	button_spinner.hidden = true;
 	button_stop_disabled.hidden = true;
 	button_stop_enabled.hidden = false;
+
+    //connections were reset so reload will fail;
+    //disable proxy and reload again
+    toggleProxy(false);
+    audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
 }
 
+function toggleProxy(toggle){
+    if (toggle == true){
+        var prefs = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService);
+        prefs.setIntPref("network.proxy.type", 1);
+        prefs.setCharPref("network.proxy.ssl","127.0.0.1");
+        //proxy_port_int is set in responseStartRecording
+        prefs.setIntPref("network.proxy.ssl_port", proxy_port_int);
+    }
+    else{
+        Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService).getBranch("network.proxy.").setIntPref("type", 0);
+    }
+}
 
 function stopRecording(){
 	help.value = "Preparing the data to be sent to the auditor"
 	//disable proxy so that we can reach our localhost backend
-	Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService).getBranch("network.proxy.").setIntPref("type", 0);
+    toggleProxy(false);
 	button_spinner.hidden = true;
 	button_record_enabled.hidden = true;
 	button_stop_enabled.hidden = true;
@@ -379,7 +380,7 @@ function responseStopRecording(iteration){
 		return;
 	}
 	//else successful response, disable proxying
-	Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService).setIntPref("network.proxy.type", 0);
+    toggleProxy(false);
 	popupShow("Congratulations. The auditor has acknowledged successful receipt of your audit data. You may now close the browser");
 	help.value = "Auditing session ended successfully";
 	return;
