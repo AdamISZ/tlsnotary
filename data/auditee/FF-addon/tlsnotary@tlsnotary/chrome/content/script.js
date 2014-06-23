@@ -86,10 +86,10 @@ function startRecording(){
 	button_spinner.hidden = false;
 	button_stop_disabled.hidden = false;
 	button_stop_enabled.hidden = true;
-	if (bIsRecordingSoftwareStarted){
-		preparePMS();
-		return;
-	}	
+    //if (bIsRecordingSoftwareStarted){
+    //	preparePMS();
+    //	return;
+    //}
 	help.value = "Initializing the recording software"
 	reqStartRecording = new XMLHttpRequest();
     reqStartRecording.onload = responseStartRecording;
@@ -167,7 +167,6 @@ function responsePreparePMS(iteration){
 	var sdr = Cc["@mozilla.org/security/sdr;1"].getService(Ci.nsISecretDecoderRing);
 	sdr.logoutAndTeardown();
 	observer.register();
-	//audited_browser.addProgressListener(loadListener);
     toggleProxy(true);
 	audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
 	makeSureReloadDoesntTakeForever(0);
@@ -215,37 +214,12 @@ myObserver.prototype = {
   }
 }
 
-
-//copied from https://developer.mozilla.org/en-US/docs/Code_snippets/Progress_Listeners
-const STATE_STOP = Ci.nsIWebProgressListener.STATE_STOP;
-const STATE_IS_WINDOW = Ci.nsIWebProgressListener.STATE_IS_WINDOW;
-//start decrypting the trace as soon as DOM is loaded
-var loadListener = {
-    QueryInterface: XPCOMUtils.generateQI(["nsIWebProgressListener",
-                                           "nsISupportsWeakReference"]),
-
-    onStateChange: function(aWebProgress, aRequest, aFlag, aStatus) {
-        if ((aFlag & STATE_STOP) && (aFlag & STATE_IS_WINDOW) && (aWebProgress.DOMWindow == aWebProgress.DOMWindow.top)) {
-            // This fires when the page load finishes
-			audited_browser.removeProgressListener(this);
-			help.value = "Decrypting HTML (will pop up in a new tab)"
-			get_html_paths();
-        }
-    },
-    onLocationChange: function(aProgress, aRequest, aURI) {},
-    onProgressChange: function(aWebProgress, aRequest, curSelf, maxSelf, curTot, maxTot) {},
-    onStatusChange: function(aWebProgress, aRequest, aStatus, aMessage) {},
-    onSecurityChange: function(aWebProgress, aRequest, aState) {}
-}
-
-
 function auditeeMacCheck(){
     reqAuditeeMacCheck = new XMLHttpRequest();
     reqAuditeeMacCheck.onload = responseAuditeeMacCheck;
     reqAuditeeMacCheck.open("HEAD", "http://127.0.0.1:"+port+"/auditee_mac_check", true);
     reqAuditeeMacCheck.send();
-    //responseAuditeeMacCheck(0);
-    //TODO: handle response
+    responseAuditeeMacCheck(0);
 }
 
 
@@ -259,6 +233,7 @@ function responseAuditeeMacCheck(iteration){
         return;
     }
     //else: not a timeout but a response from my backend server
+    //alert("Got auditee mac check response from backend");
     bAuditeeMacCheckResponded = true;
 	//audited_browser.stop();	
     get_html_paths();

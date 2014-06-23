@@ -56,10 +56,10 @@ firefox_pid = stcppipe_pid = selftest_pid = 0
 
 PMS1 = '' #first half of pre-master secret. global because of google check
 md5hmac = '' #used in get_html_paths to construct the full MS after committing to a hash
-bIsStcppipeStarted = False
 cr_list = [] #a list of all client_randoms for recorded pages used by tshark to search for html only in audited tracefiles.
 auditee_mac_check = False #tmp var
 get_html_paths_retval = None #tmp  var
+uidsAlreadyProcessed = [] #for nss patch thread to check for new audits
 
 def import_auditor_pubkey(auditor_pubkey_b64modulus):
     global auditorPubKey                      
@@ -167,12 +167,7 @@ class HandlerClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             return       
         #----------------------------------------------------------------------#
         if self.path.startswith('/start_recording'):
-            global bIsStcppipeStarted            
-            if not bIsStcppipeStarted:
-                bIsStcppipeStarted = True
-                rv = start_recording()
-            else:
-                rv = ('success', 'success')
+            rv = start_recording()
             if rv[0] != 'success':
                 self.respond({'response':'start_recording', 'status':rv[0]})
                 return
@@ -451,7 +446,8 @@ def prepare_pms():
         b64_crsr = b64encode(cr+sr)
         reply = send_and_recv('gcr_gsr:'+b64_crsr)       
         if reply[0] != 'success': raise Exception ('Failed to receive a reply for gcr_gsr:')
-        if not reply[1].startswith('grsapms_ghmac:'): raise Exception ('bad reply. Expected grsapms_ghmac:')    
+        if not reply[1].startswith('grsapms_ghmac:'):
+            raise Exception ('bad reply. Expected grsapms_ghmac:')
         b64_grsapms_ghmac = reply[1][len('grsapms_ghmac:'):]
         try: grsapms_ghmac = b64decode(b64_grsapms_ghmac)    
         except: raise Exception ('base64 decode error in grsapms_ghmac')       
@@ -811,7 +807,6 @@ def new_audited_connection(uid):
    
 #scan the dir until a new file appears and then spawn a new processing thread
 def nss_patch_audited_connections():
-    uidsAlreadyProcessed = []
     uid = ''
     bNewUIDFound = False    
     while True:
@@ -852,14 +847,13 @@ def new_sleep_proxy_connection_thread(socket_client, socket_stcppipe):
             #TODO dont rely on a fixed timeout because on a slow Chinese connection  it may take longer than that
             #instead every 3 seconds try to decrypt html from the trace and if html is
             #available then terminate this thread
-            if int(time.time()) - last_time_data_was_seen_from_server < 10: continue
+            if int(time.time()) - last_time_data_was_seen_from_server < 3: continue
             #dont send databuf anywhere, the server responce is already in the trace
             print ('*******************************************************************************Server responded')        
             shutdown_sockets([socket_client, socket_stcppipe])
             rv = get_html_paths()
             if not rv[0]=='success':
                 raise Exception('Decryption failed in sleep proxy')
-
             global auditee_mac_check
             auditee_mac_check = True
             return
@@ -882,6 +876,7 @@ def new_sleep_proxy_connection_thread(socket_client, socket_stcppipe):
                     socket_stcppipe.send(data)
                     continue
                 elif rsocket is socket_stcppipe:
+                    last_time_data_was_seen_from_server = int(time.time())
                     if bDataFromServerSeen: #this is yet another application data packet
                         databuffer += data
                         continue
@@ -935,7 +930,7 @@ def new_connection_thread(socket_client):
     print ('New connection to ' + host_ip + ' port ' + port)
     #tell Firefox that connection is established and it can start sending data
     socket_client.send('HTTP/1.1 200 Connection established\n' + 'Proxy-agent: tlsnotary https proxy\n\n')
-    
+
     last_time_data_was_seen = int(time.time())
     while True:
         rlist, wlist, xlist = select.select((socket_client, socket_target), (), (socket_client, socket_target), 60)
@@ -955,7 +950,7 @@ def new_connection_thread(socket_client):
         for rsocket in rlist:
             try:
                 data = rsocket.recv(8192)
-                if not data: 
+                if not data:
                     #XXX Why did select() trigger if there was no data?
                     #this overwhelms CPU big time unless we sleep
                     if int(time.time()) - last_time_data_was_seen > 60: #prevent no-data sockets from looping endlessly
@@ -963,7 +958,7 @@ def new_connection_thread(socket_client):
                         return
                     #else timeout seconds of datalessness have not elapsed
                     time.sleep(0.1)
-                    continue 
+                    continue
                 last_time_data_was_seen = int(time.time())
                 if rsocket is socket_client:
                     socket_target.send(data)
@@ -1023,7 +1018,12 @@ def https_proxy_thread(parenthread, port):
 def start_recording():
     global stcppipe_proc
     global stcppipe_pid
-   
+
+    #stcppipe may still be running from the previous audit
+    if stcppipe_pid != 0:
+        try: os.kill(stcppipe_pid, signal.SIGTERM)
+        except: pass #stcppipe not runnng
+
     #start the https proxy and make sure the port is not in use
     bWasStarted = False
     for i in range(3):
@@ -1040,14 +1040,17 @@ def start_recording():
     #start stcppipe making sure the port is not in use
     bWasStarted = False
     logdir = join(current_sessiondir, 'tracelog')
-    os.makedirs(logdir)
+    if not os.path.exists(logdir): os.makedirs(logdir)
+
+    #TODO: do this stuff once only
     if OS=='mswin': stcppipe_exename = 'stcppipe.exe'
     elif OS=='linux': 
         if platform.architecture()[0] == '64bit': stcppipe_exename = 'stcppipe64_linux'
         else: stcppipe_exename = 'stcppipe_linux'
     elif OS=='macos': 
         if platform.architecture()[0] == '64bit':stcppipe_exename = 'stcppipe64_mac'
-        else: stcppipe_exename = 'stcppipe_mac'                
+        else: stcppipe_exename = 'stcppipe_mac'
+
     for i in range(3):
         stcppipe_in_port = random.randint(1025,65535)
         stcppipe_proc = Popen([join(datadir, 'stcppipe', stcppipe_exename),'-d',

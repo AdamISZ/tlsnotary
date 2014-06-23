@@ -103,7 +103,7 @@ def process_messages():
             send_message('grsapms_ghmac:'+ b64_grsapms_ghmac)
             continue
          #---------------------------------------------------------------------#
-        elif msg.startswith('cr_sr_hmac_n_e:'): 
+        elif msg.startswith('cr_sr_hmac_n_e:'):
             progressQueue.put(time.strftime('%H:%M:%S', time.localtime()) + ': Processing data from the auditee.')
             b64_cr_sr_hmac_n_e = msg[len('cr_sr_hmac_n_e:'):]
             try: cr_sr_hmac_n_e = base64.b64decode(b64_cr_sr_hmac_n_e)
