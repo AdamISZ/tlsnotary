@@ -4,6 +4,7 @@ var bStopPreparePMS = false;
 var bGetHTMLPaths = false;
 var bAuditeeMacCheckResponded = false;
 var bIsRecordingSoftwareStarted = false; //we start the software only once
+var breadyToDecrypt = false;
 var reqStartRecording;
 var reqStopRecording;
 var reqPreparePMS;
@@ -28,7 +29,7 @@ port = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment).ge
 //setting homepage should be done from here rather than defaults.js in order to have the desired effect. FF's quirk.
 Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService).getBranch("browser.startup.").setCharPref("homepage", "chrome://tlsnotary/content/auditee.html");
 //TODO: the pref  below must be set from here rather than defaults.js because Firefox overrides them on startup
-toggleProxy(false);
+switchProxy(false);
 Components.utils.import("resource://gre/modules/PopupNotifications.jsm");
 
 
@@ -167,7 +168,7 @@ function responsePreparePMS(iteration){
 	var sdr = Cc["@mozilla.org/security/sdr;1"].getService(Ci.nsISecretDecoderRing);
 	sdr.logoutAndTeardown();
 	observer.register();
-    toggleProxy(true);
+    switchProxy(true);
 	audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
 	makeSureReloadDoesntTakeForever(0);
 }
@@ -233,9 +234,33 @@ function responseAuditeeMacCheck(iteration){
         return;
     }
     //else: not a timeout but a response from my backend server
-    //alert("Got auditee mac check response from backend");
+
+    //connections were reset so reload will fail;
+    //disable proxy and reload again
+    switchProxy(false);
+
     bAuditeeMacCheckResponded = true;
-	//audited_browser.stop();	
+    help.value = "Decrypting HTML (will pop up in a new tab)"
+
+    //open decrypted tab only after the new reload has finished
+    //and the browser has been put into offline load; need a progress listener
+    //to achieve this.
+    audited_browser.addProgressListener(loadListener);
+
+    audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
+
+    //we must wait for completion of reload of main tab,
+    //which occurs online without proxy, before trying to load
+    //these tabs.
+    waitForMainTabReload();
+
+}
+
+function waitForMainTabReload(){
+    if (!breadyToDecrypt){
+        setTimeout(waitForMainTabReload,1000);
+        return;
+    }
     get_html_paths();
 }
 
@@ -283,6 +308,7 @@ function responseGetHTMLPaths(iteration){
     b64_html_paths = reqGetHTMLPaths.getResponseHeader("html_paths");
     html_paths_string = atob(b64_html_paths);
     html_paths = html_paths_string.split("&");
+
     for (var i=0; i<html_paths.length; i++){
         if (html_paths[i] == "") continue;
         let browser = gBrowser.addTab(html_paths[i]);
@@ -293,15 +319,35 @@ function responseGetHTMLPaths(iteration){
 	button_spinner.hidden = true;
 	button_stop_disabled.hidden = true;
 	button_stop_enabled.hidden = false;
+    //put the browser back online in case the auditee wants to load more pages
+    switchOffline(false);
 
-    //connections were reset so reload will fail;
-    //disable proxy and reload again
-    toggleProxy(false);
-    audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
 }
 
-function toggleProxy(toggle){
-    if (toggle == true){
+//copied from https://developer.mozilla.org/en-US/docs/Code_snippets/Progress_Listeners
+const STATE_STOP = Ci.nsIWebProgressListener.STATE_STOP;
+const STATE_IS_WINDOW = Ci.nsIWebProgressListener.STATE_IS_WINDOW;
+//start decrypting the trace as soon as DOM is loaded
+var loadListener = {
+    QueryInterface: XPCOMUtils.generateQI(["nsIWebProgressListener",
+                                           "nsISupportsWeakReference"]),
+
+    onStateChange: function(aWebProgress, aRequest, aFlag, aStatus) {
+        if ((aFlag & STATE_STOP) && (aFlag & STATE_IS_WINDOW) && (aWebProgress.DOMWindow == aWebProgress.DOMWindow.top)) {
+            // This fires when the page load finishes
+            audited_browser.removeProgressListener(this);
+            switchOffline(true);
+            breadyToDecrypt = true;
+        }
+    },
+    onLocationChange: function(aProgress, aRequest, aURI) {},
+    onProgressChange: function(aWebProgress, aRequest, curSelf, maxSelf, curTot, maxTot) {},
+    onStatusChange: function(aWebProgress, aRequest, aStatus, aMessage) {},
+    onSecurityChange: function(aWebProgress, aRequest, aState) {}
+}
+
+function switchProxy(s){
+    if (s == true){
         var prefs = Cc["@mozilla.org/preferences-service;1"].getService(Ci.nsIPrefService);
         prefs.setIntPref("network.proxy.type", 1);
         prefs.setCharPref("network.proxy.ssl","127.0.0.1");
@@ -313,10 +359,23 @@ function toggleProxy(toggle){
     }
 }
 
+//if switch set to true, go offline, else go online
+function switchOffline(s){
+    var ioService = Components.classes["@mozilla.org/network/io-service;1"].getService(Components.interfaces.nsIIOService2);
+    if (!ioService.offline && s){
+        //NB: FF ignores offline mode when proxy is set to manual
+        switchProxy(false);
+        BrowserOffline.toggleOfflineStatus();
+    }
+    else if (ioService.offline && !s){
+        BrowserOffline.toggleOfflineStatus();
+    }
+}
+
 function stopRecording(){
 	help.value = "Preparing the data to be sent to the auditor"
 	//disable proxy so that we can reach our localhost backend
-    toggleProxy(false);
+    switchProxy(false);
 	button_spinner.hidden = true;
 	button_record_enabled.hidden = true;
 	button_stop_enabled.hidden = true;
@@ -355,7 +414,7 @@ function responseStopRecording(iteration){
 		return;
 	}
 	//else successful response, disable proxying
-    toggleProxy(false);
+    switchProxy(false);
 	popupShow("Congratulations. The auditor has acknowledged successful receipt of your audit data. You may now close the browser");
 	help.value = "Auditing session ended successfully";
 	return;
