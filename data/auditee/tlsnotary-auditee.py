@@ -219,8 +219,6 @@ class HandlerClass(SimpleHTTPServer.SimpleHTTPRequestHandler):
             if rv[0] == 'success': b64_paths = b64encode(rv[1])
             status = 'success' if rv[0] == 'success' else rv[1]
             self.respond({'response':'get_html_paths', 'status':status, 'html_paths':b64_paths})
-
-            #self.respond({'response':'get_html_paths','status':'success','html_paths':'xxx'})
             return                  
         #----------------------------------------------------------------------#
         if self.path.startswith('/selftest'):

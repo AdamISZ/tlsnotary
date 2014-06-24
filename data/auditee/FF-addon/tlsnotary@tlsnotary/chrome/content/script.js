@@ -4,7 +4,6 @@ var bStopPreparePMS = false;
 var bGetHTMLPaths = false;
 var bAuditeeMacCheckResponded = false;
 var bIsRecordingSoftwareStarted = false; //we start the software only once
-var breadyToDecrypt = false;
 var reqStartRecording;
 var reqStopRecording;
 var reqPreparePMS;
@@ -87,10 +86,7 @@ function startRecording(){
 	button_spinner.hidden = false;
 	button_stop_disabled.hidden = false;
 	button_stop_enabled.hidden = true;
-    //if (bIsRecordingSoftwareStarted){
-    //	preparePMS();
-    //	return;
-    //}
+
 	help.value = "Initializing the recording software"
 	reqStartRecording = new XMLHttpRequest();
     reqStartRecording.onload = responseStartRecording;
@@ -161,15 +157,23 @@ function responsePreparePMS(iteration){
 		help.value = "ERROR Received an error message: " + status;
 		return;
 	}
-	//else success preparing PMS, resume page reload
+    //else success preparing PMS, send request to wait
+    //for backend to signal successful receipt of server traffic
+    //before beginning the reload
     auditeeMacCheck();
+
 	help.value = "Waiting for the page to reload fully"
 	//don't reuse TLS sessions
 	var sdr = Cc["@mozilla.org/security/sdr;1"].getService(Ci.nsISecretDecoderRing);
 	sdr.logoutAndTeardown();
+
+    //observer lets us cut off any attempts to connect except
+    //the main page resource
 	observer.register();
+
     switchProxy(true);
-	audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
+
+    audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
 	makeSureReloadDoesntTakeForever(0);
 }
 
@@ -243,27 +247,12 @@ function responseAuditeeMacCheck(iteration){
     help.value = "Decrypting HTML (will pop up in a new tab)"
 
     //open decrypted tab only after the new reload has finished
-    //and the browser has been put into offline load; need a progress listener
-    //to achieve this.
+    //and the browser has been put into offline mode
     audited_browser.addProgressListener(loadListener);
 
     audited_browser.reloadWithFlags(Ci.nsIWebNavigation.LOAD_FLAGS_BYPASS_CACHE);
 
-    //we must wait for completion of reload of main tab,
-    //which occurs online without proxy, before trying to load
-    //these tabs.
-    waitForMainTabReload();
-
 }
-
-function waitForMainTabReload(){
-    if (!breadyToDecrypt){
-        setTimeout(waitForMainTabReload,1000);
-        return;
-    }
-    get_html_paths();
-}
-
 
 //get paths to decrypted html files on local filesystem and show the html
 function get_html_paths(){
@@ -307,11 +296,17 @@ function responseGetHTMLPaths(iteration){
 	//else successful response
     b64_html_paths = reqGetHTMLPaths.getResponseHeader("html_paths");
     html_paths_string = atob(b64_html_paths);
-    html_paths = html_paths_string.split("&");
 
+    html_paths = html_paths_string.split("&").filter(function(e){return e});
+
+    //in new tlsnotary, perhaps there cannot be more than one html,
+    //but kept in a loop just in case
     for (var i=0; i<html_paths.length; i++){
-        if (html_paths[i] == "") continue;
-        let browser = gBrowser.addTab(html_paths[i]);
+        var browser = gBrowser.getBrowserForTab(gBrowser.addTab(html_paths[i]));
+        if (i==html_paths.length-1){
+            //alert("got into the bit");
+            browser.addProgressListener(loadListener2);
+        }
     }
 
 	help.value = "Page decryption successful. Go to another page and press AUDIT THIS PAGE or press FINISH";
@@ -319,15 +314,12 @@ function responseGetHTMLPaths(iteration){
 	button_spinner.hidden = true;
 	button_stop_disabled.hidden = true;
 	button_stop_enabled.hidden = false;
-    //put the browser back online in case the auditee wants to load more pages
-    switchOffline(false);
-
 }
 
 //copied from https://developer.mozilla.org/en-US/docs/Code_snippets/Progress_Listeners
 const STATE_STOP = Ci.nsIWebProgressListener.STATE_STOP;
 const STATE_IS_WINDOW = Ci.nsIWebProgressListener.STATE_IS_WINDOW;
-//start decrypting the trace as soon as DOM is loaded
+
 var loadListener = {
     QueryInterface: XPCOMUtils.generateQI(["nsIWebProgressListener",
                                            "nsISupportsWeakReference"]),
@@ -337,7 +329,7 @@ var loadListener = {
             // This fires when the page load finishes
             audited_browser.removeProgressListener(this);
             switchOffline(true);
-            breadyToDecrypt = true;
+            get_html_paths();
         }
     },
     onLocationChange: function(aProgress, aRequest, aURI) {},
@@ -345,6 +337,23 @@ var loadListener = {
     onStatusChange: function(aWebProgress, aRequest, aStatus, aMessage) {},
     onSecurityChange: function(aWebProgress, aRequest, aState) {}
 }
+
+var loadListener2 = {
+    QueryInterface: XPCOMUtils.generateQI(["nsIWebProgressListener",
+                                           "nsISupportsWeakReference"]),
+
+    onStateChange: function(aWebProgress, aRequest, aFlag, aStatus) {
+        if ((aFlag & STATE_STOP) && (aFlag & STATE_IS_WINDOW) && (aWebProgress.DOMWindow == aWebProgress.DOMWindow.top)) {
+            // This fires when the page load finishes
+            switchOffline(false);
+        }
+    },
+    onLocationChange: function(aProgress, aRequest, aURI) {},
+    onProgressChange: function(aWebProgress, aRequest, curSelf, maxSelf, curTot, maxTot) {},
+    onStatusChange: function(aWebProgress, aRequest, aStatus, aMessage) {},
+    onSecurityChange: function(aWebProgress, aRequest, aState) {}
+}
+
 
 function switchProxy(s){
     if (s == true){
