@@ -570,11 +570,15 @@ class AESModeOfOperation(object):
                         stringOut += chr(plaintext[k])
                     iput = output
                 elif mode == self.modeOfOperation["CBC"]:
+                    #print "Starting CBC mode of operation decryption using key: ",key, " and size: ",size, " and ciphertext: ",ciphertext
                     output = self.aes.decrypt(ciphertext, key, size)
+                    #print "Got output from internal aes decryption: ",output
                     for i in range(16):
                         if firstRound:
+                            #print "Doing a first round xor"
                             plaintext[i] = IV[i] ^ output[i]
                         else:
+                            #print "doing a non-first round xor"
                             plaintext[i] = iput[i] ^ output[i]
                     firstRound = False
                     if originalsize is not None and originalsize < end:

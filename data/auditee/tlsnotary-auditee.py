@@ -59,7 +59,9 @@ md5hmac = '' #used in get_html_paths to construct the full MS after committing t
 cr_list = [] #a list of all client_randoms for recorded pages used by tshark to search for html only in audited tracefiles.
 auditee_mac_check = False #tmp var
 get_html_paths_retval = None #tmp  var
-uidsAlreadyProcessed = [] #for nss patch thread to check for new audits. Why was this made a global var?    
+uidsAlreadyProcessed = [] #for nss patch thread to check for new audits. Why was this made a global var?
+mode_dark = 0 #audit specific plaintext instead of whole page
+ciphertext_blocks = None #the full set of ciphertext blocks from the server response, stored as a list in hex format
 
 def import_auditor_pubkey(auditor_pubkey_b64modulus):
     global auditorPubKey                      
@@ -309,20 +311,22 @@ def get_html_paths():
     tracecopy_path = join(commit_dir, 'trace'+ str(len(cr_list)) )
     md5hmac_path = join(commit_dir, 'md5hmac'+ str(len(cr_list)) )
     with open(md5hmac_path, 'wb') as f: f.write(md5hmac)
-    #copy the tracefile to a new location, b/c stcppipe may still be appending it
+
     shutil.copyfile(join(tracelog_dir, one_trace), tracecopy_path)
     #Remove the data from the auditee to the auditor (except handshake) from the copied
     #trace using editcap. (To address the small possibility of data leakage from request urls)
-    output = check_output([tshark_exepath,'-r',tracecopy_path,'-Y',
+
+    #first isolate the frame which contains the Server Certificate
+    certificate_frame = check_output([tshark_exepath,'-r',tracecopy_path,'-Y',
                                     'ssl.handshake.certificate',
 				    '-o','http.ssl.port:1025-65535',
 				    '-T','fields',
                                    '-e','tcp.srcport'])
-    if not output:
+    if not certificate_frame:
         raise Exception("No certificate found in trace.")
     #gather the trace frames which were sent from the same port as the certificate
     output = check_output([tshark_exepath,'-r',tracecopy_path,'-Y',
-                                    'ssl.handshake or tcp.srcport=='+output.strip(),
+                                    'ssl.handshake or tcp.srcport=='+certificate_frame.strip(),
 				    '-o','http.ssl.port:1025-65535',
                                     '-T','fields','-e','frame.number'])
     if not output:
@@ -338,16 +342,59 @@ def get_html_paths():
     backup_full_trace_path = os.path.join(current_sessiondir, 'backup_trace'+str(len(cr_list)))
     shutil.move(tracecopy_path,backup_full_trace_path)
     shutil.move(trimmed_trace_path,tracecopy_path)    
-      
-    #send the hash of tracefile and md5hmac
-    with open(tracecopy_path, 'rb') as f: data=f.read()
-    commit_hash = sha256(data).digest()
-    md5hmac_hash = sha256(md5hmac).digest()  
-    reply = send_and_recv('commit_hash:'+commit_hash+md5hmac_hash)
+
+    #HASH COMMITMENT PHASE
+    #=====================
+    #The commitment is different depending on whether we use dark mode or classic mode
+    md5hmac_hash = sha256(md5hmac).digest()
+
+    if mode_dark:
+        #extract the ciphertext from the tshark trace file; we must restrict filter to
+        #frames *after* the certificate, because otherwise we can accidentally pick up
+        #HTTP CONNECTs occurring before the handshake
+        ascii_dump = check_output(['tshark', '-r', tracecopy_path, '-Y',
+        'ssl and not ssl.handshake and frame.number > '+str(certificate_frame), '-x'])
+
+        cpt = shared.get_ciphertext_from_asciidump(ascii_dump)
+
+        #strip any excess bytes after the blocks (TODO is this necessary? why?)
+        cpt = cpt[:-(len(cpt)%16)]
+        #split ciphertext into blocks and store in hex format
+        global ciphertext_blocks
+        ciphertext_blocks=zip(*[iter(ciphertext)]*16)
+        ciphertext_blocks = [binascii.hexlify(bytearray(x)) for x in ciphertext_blocks]
+        #write out the ciphertext blocks to a file for later reveal phase
+        with open(join(commit_dir,'ciphertext_blocks'+str(len(cr_list))),'wb') as f:
+            f.writelines("%s\n" % x for x in ciphertext_blocks)
+
+        cpt_hashes = [sha256(x).digest() for x in hex_cpt_blocks]
+        cpt_hashes_file = join(commit_dir,'cpt_hashes'+str(len(cr_list)))
+        with open(cpt_hashes_file,'wb') as f: f.write('\n'.join(cpt_hashes))
+        try: link = sendspace_getlink(cpt_hashes_file)
+        except:
+            try: link = pipebytes_getlink(cpt_hashes_file)
+            except: return 'failure'
+        reply = send_and_recv('commit_hash:1'+md5hmac_hash+link)
+
+    else:
+        #send the hash of tracefile and md5hmac
+        with open(tracecopy_path, 'rb') as f: data=f.read()
+        commit_hash = sha256(data).digest()
+        reply = send_and_recv('commit_hash:0'+commit_hash+md5hmac_hash)
+
+    #whatever commitment was made (i.e. for either mode),
+    #we expect receipt of the sha1hmac which will allow reconstruction
+    #of the master secret
     if reply[0] != 'success': raise Exception ('Failed to receive a reply')
     if not reply[1].startswith('sha1hmac_for_MS:'):
         raise Exception ('bad reply. Expected sha1hmac_for_MS')
     sha1hmac_for_MS = reply[1][len('sha1hmac_for_MS:'):]
+
+    #LOCAL DECRYPTION PHASE
+    #=====================
+    #Now the auditor has received the appropriate commitment
+    #depending on the mode, we are ready to do local decryption
+
 
     #construct MS
     ms = shared.xor(md5hmac, sha1hmac_for_MS)[:48]
@@ -455,8 +502,7 @@ def prepare_pms():
         md5hmac = shared.TLS10PRF(label+seed,first_half=pms1)[0]
 
         ms = shared.xor(md5hmac, shahmac)[:48]
-        #derive expanded keys for AES256
-        #this is not optimized in a loop on purpose. I want people to see exactly what is going on        
+        #derive expanded keys for AES256        
         ms_first_half = ms[:24]
         ms_second_half = ms[24:]
         label = 'key expansion'
@@ -468,7 +514,7 @@ def prepare_pms():
         client_encryption_key = gexpanded_keys[40:72]
         client_iv = gexpanded_keys[104:120]
         #RSA-encrypt my half of PMS with google's pubkey
-        RSA_PMS1_int = pow( shared.ba2int('\x02'+('\x01'*156)+'\x00'+pms1+('\x00'*24)) + 1, google_exponent, google_modulus)
+        RSA_PMS1_int = pow( shared.ba2int('\x02'+('\x01'*63)+os.urandom(15)+'\x00'+pms1+('\x00'*24)) + 1, google_exponent, google_modulus)
         RSA_PMS2_int = shared.ba2int(rsapms2)
         enc_pms_int = (RSA_PMS1_int*RSA_PMS2_int) % google_modulus 
         encpms = shared.bigint_to_bytearray(enc_pms_int)
@@ -516,6 +562,7 @@ def prepare_pms():
             continue
         #else ccs was in the response
         tlssock.close()
+        print ('successful pms check')
         return ('success', pms1) #successfull pms check        
     #no dice after 5 tries
     raise Exception ('Could not prepare PMS with google after 5 tries')
@@ -585,23 +632,48 @@ def pipebytes_getlink(mfile):
 
 def stop_recording():
     os.kill(stcppipe_proc.pid, signal.SIGTERM)
-    #trace* files in committed dir is what auditor needs
+
+    #REVEAL PHASE
+    #We provide to the auditor:
+    #md5hmac - to allow reconstruction of master secret
+    #domain - to verify pubkey
+    #for classic mode: network trace file generated by stcppipe
+    #for dark mode: a set of ciphertext blocks for decryption
+
     tracedir = join(current_sessiondir, 'mytrace')
     os.makedirs(tracedir)
-    zipf = zipfile.ZipFile(join(tracedir, 'mytrace.zip'), 'w')
     commit_dir = join(current_sessiondir, 'commit')
-    com_dir_files = os.listdir(commit_dir)
-    for onefile in com_dir_files:
-        if not onefile.startswith(('trace', 'md5hmac', 'domain')): continue
-        zipf.write(join(commit_dir, onefile), onefile)
+    zipf = zipfile.ZipFile(join(tracedir, 'mytrace.zip'), 'w')
+
+    if not mode_dark:
+        #trace* files in committed dir is what auditor needs for classic mode
+        com_dir_files = os.listdir(commit_dir)
+        for onefile in com_dir_files:
+            if not onefile.startswith(('trace', 'md5hmac', 'domain')): continue
+            zipf.write(join(commit_dir, onefile), onefile)
+
+    else:
+        #TODO Need user interface functionality to (a) show plain html (b)user selects text (c) convert to ciphertext blocks
+        #for now, just an example: blocks 11-20 will be decrypted.
+        #ciphertext reveal file - this will contain the hex of the specific subset of
+        #ciphertexts the user chose to reveal, and that file will be sent to the auditor
+        #(over sendspace or can we get away with IRC/underlying messaging?)
+        crf = join(commit_dir,'ciphertext_reveal')
+        with open(crf,'wb') as f: f.writelines("%s\n" % x for x in ciphertext_blocks[11:20])
+        #we bundle up: md5hmac (so auditor can construct MS and thus extract enc key),
+        #ciphertext reveal file, and domain file
+        com_dir_files = os.listdir(commit_dir)
+        for onefile in com_dir_files:
+            if not onefile.startswith(('ciphertext_reveal', 'md5hmac', 'domain')): continue
+            zipf.write(join(commit_dir, onefile), onefile)
+
     zipf.close()
-    try: link = sendspace_getlink(join(tracedir, 'mytrace.zip'))
+    link_file = join(tracedir, 'mytrace.zip')
+    try: link = sendspace_getlink(link_file)
     except:
-        try: link = pipebytes_getlink(join(tracedir, 'mytrace.zip'))
+        try: link = pipebytes_getlink(link_file)
         except: return 'failure'
     return send_link(link)
-    
-
     
 #The NSS patch has created a new file in the nss_patch_dir
 def new_audited_connection(uid): 
@@ -695,13 +767,14 @@ def new_audited_connection(uid):
     seed = sr + cr
     sha1hmac140bytes = shared.TLS10PRF(label+seed,req_bytes=140,second_half=MS2)[1]
 
-    #this if/else is purely for expliciteness, we could simply xor the 140bytes with however long the md5hmac is
+    #this if/else is purely for explicitness, we could simply xor the 140bytes with however long the md5hmac is
     if cipher_suite == 'AES256': sha1hmac_for_ek = sha1hmac140bytes[:136]
     elif cipher_suite == 'AES128': sha1hmac_for_ek = sha1hmac140bytes[:104]
     elif cipher_suite == 'RC4SHA': sha1hmac_for_ek = sha1hmac140bytes[:72]
     elif cipher_suite == 'RC4MD5': sha1hmac_for_ek = sha1hmac140bytes[:64]     
     expanded_keys =  shared.xor(sha1hmac_for_ek, md5hmac_for_ek)
     #server mac key == expanded_keys[20:40]( or [16:32] for RC4MD5) contains random garbage from auditor
+    #and the same for the server enc key (which is not needed at this stage in either mode)
     with open(join(nss_patch_dir, 'expanded_keys'+uid), 'wb') as f: f.write(expanded_keys)
     with open(join(nss_patch_dir, 'expanded_keys'+uid+'ready'), 'wb') as f: f.close()     
     #wait for nss patch to create md5 and then sha files
@@ -803,42 +876,42 @@ def tcpproxy_new_connection_thread(socket_browser, socket_stcppipe):
             return
         #else rlist contains socket with data
         for rsocket in rlist:        
-            try:
-                data = rsocket.recv( 1024*1024 )
-                if not data:  #socket closed
-                    if not databuffer:
-                        #TODO: try ro reload the page one more time
-                        raise Exception('Server closed the socket and sent no data')
-                    #else the server sent a response and closed the socket
-                    #TODO: the code below is copy-pasted from above.
-                    print ('tcpproxy: Server responded')                    
-                    rv = get_html_paths() #here is where MAC check is done
-                    if not rv[0]=='success':
-                        raise Exception('Decryption failed in tcpproxy')
-                    global auditee_mac_check
-                    auditee_mac_check = True
-                    time.sleep(1.5)
-                    shutdown_sockets([socket_browser, socket_stcppipe])
-                    return
-                if rsocket is socket_browser:
-                    socket_stcppipe.send(data)
-                    continue
-                elif rsocket is socket_stcppipe:
-                    last_time_data_was_seen_from_server = int(time.time())
-                    if bDataFromServerSeen: #this is yet another application data packet
-                        databuffer += data
-                        continue
-                    elif data.count('\x17\x03\x01'): #this is the first appdata packet after the handshake
-                        bDataFromServerSeen = True
-                        databuffer += data
-                        continue
-                    #else not application data but a handshake
-                    socket_browser.send(data)
-                    continue                    
-            except Exception, e:
-                print('exception in tcpproxy', e)
-                shutdown_sockets([socket_browser])                
+            #try:
+            data = rsocket.recv( 1024*1024 )
+            if not data:  #socket closed
+                if not databuffer:
+                    #TODO: try ro reload the page one more time
+                    raise Exception('Server closed the socket and sent no data')
+                #else the server sent a response and closed the socket
+                #TODO: the code below is copy-pasted from above.
+                print ('tcpproxy: Server responded')
+                rv = get_html_paths() #here is where MAC check is done
+                if not rv[0]=='success':
+                    raise Exception('Decryption failed in tcpproxy')
+                global auditee_mac_check
+                auditee_mac_check = True
+                time.sleep(1.5)
+                shutdown_sockets([socket_browser, socket_stcppipe])
                 return
+            if rsocket is socket_browser:
+                socket_stcppipe.send(data)
+                continue
+            elif rsocket is socket_stcppipe:
+                last_time_data_was_seen_from_server = int(time.time())
+                if bDataFromServerSeen: #this is yet another application data packet
+                    databuffer += data
+                    continue
+                elif data.count('\x17\x03\x01'): #this is the first appdata packet after the handshake
+                    bDataFromServerSeen = True
+                    databuffer += data
+                    continue
+                #else not application data but a handshake
+                socket_browser.send(data)
+                continue
+            #except Exception, e:
+            #    print('exception in tcpproxy', e)
+            #    shutdown_sockets([socket_browser])
+            #    return
 
 
 def httpsproxy_new_connection_thread(socket_stcppipe_out):
@@ -1185,6 +1258,7 @@ def start_firefox(FF_to_backend_port):
         f.writelines([
         'user_pref("browser.startup.homepage", "chrome://tlsnotary/content/auditee.html");\n',
         'user_pref("browser.startup.homepage_override.mstone", "ignore");\n', #prevents welcome page
+        #'user_pref("network.http.accept-encoding",'');\n',
         'user_pref("browser.rights.3.shown", true);\n', 
         'user_pref("app.update.auto", false);\n',
         'user_pref("app.update.enabled", false);\n',
@@ -1391,6 +1465,13 @@ if __name__ == "__main__":
     from slowaes import AESModeOfOperation        
     import shared
     shared.load_program_config()
+    global mode_dark
+    mode_dark = int(shared.config.get("General","dark"))
+    if not mode_dark:
+        print("mode dark not in force")
+    else:
+        print("mode dark in force")
+
     if OS=='linux':
         if not (check_output(['which','tshark']) and check_output(['which','editcap'])):
             raise Exception("Please install tshark and editcap before running tlsnotary")

@@ -48,6 +48,7 @@ progressQueue = Queue.Queue() #messages intended to be displayed by the frontend
 google_modulus = google_exponent = 0
 secretbytes_amount=8
 bTerminateAllThreads = False
+mode_dark = -1 #whether the audit is for specific ciphertext blocks or whole html
 
 #processes each http request in a separate thread
 #we need threading in order to send progress updates to the frontend in a non-blocking manner
@@ -84,7 +85,7 @@ def process_messages():
             google_sr = gcr_gsr[32:64]
             #second half of pre-master secret
             PMS2 =  os.urandom(secretbytes_amount) + ('\x00' * (24-secretbytes_amount-1)) + '\x01'
-            RSA_PMS_google_int = pow( int(('\x01'+('\x00'*25)+PMS2).encode('hex'),16), google_exponent, google_modulus )
+            RSA_PMS_google_int = pow( int(('\x01'+('\x01'*63)+os.urandom(15)+('\x00'*25)+PMS2).encode('hex'),16), google_exponent, google_modulus )
             grsapms = shared.bigint_to_bytearray(RSA_PMS_google_int)
             #-------------------BEGIN get sha1hmac for google
             label = "master secret"
@@ -133,15 +134,26 @@ def process_messages():
             seed = sr + cr
             md5hmac = shared.TLS10PRF(label+seed,req_bytes=140,first_half=MS1)[0]
 
-            #fill the place of server MAC with zeroes
-            if cipher_suite == 'AES256': 
+            if cipher_suite == 'AES256':
                 md5hmac_for_ek = md5hmac[:20] + bytearray(os.urandom(20)) + md5hmac[40:136]
             elif cipher_suite == 'AES128':
                 md5hmac_for_ek = md5hmac[:20] + bytearray(os.urandom(20)) + md5hmac[40:104]
             elif cipher_suite == 'RC4SHA':
                 md5hmac_for_ek = md5hmac[:20] + bytearray(os.urandom(20)) + md5hmac[40:72]
+            elif cipher_suite == 'RC4MD5':
+                md5hmac_for_ek = md5hmac[:16] + bytearray(os.urandom(16)) + md5hmac[32:64]
+
+            '''
+            #fill the place of server MAC and server enc key with random bytes (enc key does not need to be sent, even in classic mode)
+            if cipher_suite == 'AES256': 
+                md5hmac_for_ek = md5hmac[:20] + bytearray(os.urandom(20)) + md5hmac[40:72] + bytearray(os.urandom(32)) + md5hmac[104:136]
+            elif cipher_suite == 'AES128':
+                md5hmac_for_ek = md5hmac[:20] + bytearray(os.urandom(20)) + md5hmac[40:56] + bytearray(os.urandom(16)) + md5hmac[72:104]
+            elif cipher_suite == 'RC4SHA':
+                md5hmac_for_ek = md5hmac[:20] + bytearray(os.urandom(20)) + md5hmac[40:56] + bytearray(os.urandom(16))
             elif cipher_suite == 'RC4MD5': 
-                md5hmac_for_ek = md5hmac[:16] + bytearray(os.urandom(16)) + md5hmac[32:64]     
+                md5hmac_for_ek = md5hmac[:16] + bytearray(os.urandom(16)) + md5hmac[32:48] + bytearray(os.urandom(16))
+            '''
             rsapms_hmacms_hmacek = shared.bigint_to_bytearray(RSA_PMS2_int)+sha1hmac2_for_MS+md5hmac_for_ek
             send_message('rsapms_hmacms_hmacek:'+ rsapms_hmacms_hmacek)
             continue
@@ -159,35 +171,62 @@ def process_messages():
             continue
         #------------------------------------------------------------------------------------------------------#    
         elif msg.startswith('commit_hash:'):
-            commit_hash = msg[len('commit_hash:'):]
-            trace_hash = commit_hash[:32]
-            md5hmac_hash = commit_hash[32:64]
             commit_dir = os.path.join(current_sessiondir, 'commit')
             if not os.path.exists(commit_dir): os.makedirs(commit_dir)
-            #file names are assigned sequentially hash1, hash2 etc.
+            #Here the auditor receives info about which audit mode is in use
+            #and remembers it (first byte of commit hash message)
+            global mode_dark
+            mode_dark = int(msg[12])
+            commit_hash = msg[len('commit_hash:X'):]
+
+            if mode_dark == 0:
+                trace_hash = commit_hash[:32]
+                md5hmac_hash = commit_hash[32:64]
+            elif mode_dark == 1:
+                time.sleep(1) #just in case the upload server needs some time to prepare the file
+                md5hmac_hash = commit_hash[:32]
+                link = commit_hash[32:]
+                req = urllib2.Request(link)
+                resp = urllib2.urlopen(req)
+                linkdata = resp.read()
+
+                with open(os.path.join(commit_dir,'ciphertext_commitment'),'wb') as f:
+                    f.write(linkdata)
+            else:
+                raise Exception("Auditee passed unrecognised audit mode.")
+
+            #file names are assigned sequentially hash1, hash2 etc (or ciphertext..1 ,2 etc)
             #The auditee must provide tracefiles trace1, trace2 corresponding to these sequence numbers
             commdir_list = os.listdir(commit_dir)
+            commitment_name = 'tracehash' if not dark_mode else 'ciphertext_commitment'
             #get last seqno
-            seqnos = [int(one_trace[len('tracehash'):]) for one_trace 
-                      in commdir_list if one_trace.startswith('tracehash')]
+            seqnos = [int(one_trace[len(commitment_name):]) for one_trace
+                      in commdir_list if one_trace.startswith(commitment_name)]
             last_seqno = max([0] + seqnos) #avoid throwing by feeding at least one value 0
             my_seqno = last_seqno+1
-            trace_hash_path = os.path.join(commit_dir, 'tracehash'+str(my_seqno))
+            trace_hash_path = os.path.join(commit_dir, commitment_name+str(my_seqno))
             n_hexlified = binascii.hexlify(n)
             n_write = " ".join(n_hexlified[i:i+2] for i in range(0, len(n_hexlified), 2)) #pubkey in the format 09 56 23 ....
             pubkey_path = os.path.join(commit_dir, 'pubkey'+str(my_seqno))
-            trace_hash_path = os.path.join(commit_dir, 'tracehash'+str(my_seqno))
+            trace_hash_path = os.path.join(commit_dir, commitment_name+str(my_seqno))
             md5hmac_hash_path =  os.path.join(commit_dir, 'md5hmac_hash'+str(my_seqno))
-            with open(pubkey_path, 'wb') as f: f.write(n_write)            
+            with open(pubkey_path, 'wb') as f: f.write(n_write)
+            if mode_dark: trace_hash = linkdata
             with open(trace_hash_path, 'wb') as f: f.write(trace_hash)
             with open(md5hmac_hash_path, 'wb') as f: f.write(md5hmac_hash)
             sha1hmac_path = os.path.join(commit_dir, 'sha1hmac'+str(my_seqno))
             with open(sha1hmac_path, 'wb') as f: f.write(sha1hmac)
             cr_path = os.path.join(commit_dir, 'cr'+str(my_seqno))
             with open(cr_path, 'wb') as f: f.write(cr)
+            sr_path = os.path.join(commit_dir,'sr'+str(my_seqno))
+            with open(sr_path,'wb') as f: f.write(sr)
+            cipher_suite_path = os.path.join(commit_dir,'cipher_suite'+str(my_seqno))
+            with open(cipher_suite_path,'wb') as f: f.write(cipher_suite)
+
             send_message('sha1hmac_for_MS:'+sha1hmac)
             continue  
         #---------------------------------------------------------------------#
+
         elif msg.startswith('link:'):
             link = msg[len('link:'):]
             time.sleep(1) #just in case the upload server needs some time to prepare the file
@@ -199,24 +238,33 @@ def process_messages():
             auditeetrace_dir = os.path.join(current_sessiondir, 'auditeetrace')
             zipf.extractall(auditeetrace_dir)
             response = 'success' #unless overridden by a failure in sanity check
+            adir_list = os.listdir(auditeetrace_dir)
+            reveal_name = 'ciphertext_reveal' if dark_mode else 'trace'
+            commit_name = 'ciphertext_commitment' if dark_mode else 'tracehash'
+
             #sanity: all trace names must be unique and their hashes must correspond to the
             #hashes which the auditee committed to earlier
-            adir_list = os.listdir(auditeetrace_dir)
             seqnos = []
             for one_trace in adir_list:
-                if not one_trace.startswith('trace'): continue
-                try: this_seqno = int(one_trace[len('trace'):])
+                if not one_trace.startswith(reveal_name): continue
+                try: this_seqno = int(one_trace[len(reveal_name):])
                 except: raise Exception ('WARNING: Could not cast trace\'s tail to int')
-                if this_seqno in seqnos: 
+                if this_seqno in seqnos:
                     raise Exception ('WARNING: multiple tracefiles names detected')
-                saved_hash_path = os.path.join(commit_dir, 'tracehash'+str(this_seqno))
-                if not os.path.exists(saved_hash_path): 
+                saved_hash_path = os.path.join(commit_dir, commit_name+str(this_seqno))
+                if not os.path.exists(saved_hash_path):
                     raise Exception ('WARNING: Auditee gave a trace number which doesn\'t have a committed hash')
                 with open(saved_hash_path, 'rb') as f: saved_hash = f.read()
                 with open(os.path.join(auditeetrace_dir, one_trace), 'rb') as f: tracedata = f.read()
-                trace_hash = hashlib.sha256(tracedata).digest()
-                if not saved_hash == trace_hash: 
-                    raise Exception ('WARNING: Trace\'s hash doesn\'t match the hash committed to')
+                if not dark_mode:
+                    trace_hash = hashlib.sha256(tracedata).digest()
+                    if not saved_hash == trace_hash:
+                        raise Exception ('WARNING: Trace\'s hash doesn\'t match the hash committed to')
+                else:
+                    cpt_reveal_hashes = [hashlib.sha256(hex_cpt_block.decode('hex')) for hex_cpt_block in tracedata.split('\n')]
+                    if not set(cpt_reveal_hashes).issubset(set(cpt_commit_hashes)):
+                        raise Exception ("Critical error, audit has FAILED. Auditee's data provided for decryption does not match what he committed to before receiving the ssl master secret")
+
                 md5hmac_path = os.path.join(auditeetrace_dir, 'md5hmac'+str(this_seqno))
                 if not os.path.exists(md5hmac_path):
                     raise Exception ('WARNING: Could not find md5hmac in auditeetrace')
@@ -227,10 +275,11 @@ def process_messages():
                     raise Exception ('WARNING: mismatch in committed md5hmac hashes')
                 domain_path = os.path.join(auditeetrace_dir, 'domain'+str(this_seqno))
                 if not os.path.exists(domain_path):
-                    raise Exception ('WARNING: Could not find domain in auditeetrace')                
+                    raise Exception ('WARNING: Could not find domain in auditeetrace')
                 #elif no errors
                 seqnos.append(this_seqno)
                 continue
+
             send_message('response:'+response)
             if response == 'success':
                 progressQueue.put(time.strftime('%H:%M:%S', time.localtime()) + ': The auditee has successfully finished the audit session')
@@ -241,49 +290,70 @@ def process_messages():
             decr_dir = os.path.join(current_sessiondir, 'decrypted')
             os.makedirs(decr_dir)
             for one_trace in adir_list:
-                if not one_trace.startswith('trace'): continue
-                seqno = one_trace[len('trace'):]
+                if not one_trace.startswith(reveal_name): continue
+                seqno = one_trace[len(reveal_name):]
                 with open(os.path.join(auditeetrace_dir, 'md5hmac'+seqno), 'rb') as f: md5hmac = f.read()
                 with open(os.path.join(commit_dir, 'sha1hmac'+seqno), 'rb') as f: sha1hmac = f.read()
                 with open(os.path.join(commit_dir, 'cr'+seqno), 'rb') as f: cr = f.read()
                 ms = shared.xor(md5hmac, sha1hmac)
-                sslkeylog = os.path.join(decr_dir, 'sslkeylog'+seqno)
-                ssldebuglog = os.path.join(decr_dir, 'ssldebuglog'+seqno)
-                cr_hexl = binascii.hexlify(cr)
-                ms_hexl = binascii.hexlify(ms)
-                with open(sslkeylog, 'wb') as f: 
-                    f.write('CLIENT_RANDOM ' + cr_hexl + ' ' + ms_hexl + '\n')
-                try: output = subprocess.check_output([tshark_exepath, '-r', 
-                                                    os.path.join(auditeetrace_dir, one_trace),
-                                                     '-Y', 'ssl and http.content_type contains html', 
-                                                     '-o', 'http.ssl.port:1025-65535', 
-                                                     '-o', 'ssl.keylog_file:'+ sslkeylog,
-                                                     '-o', 'ssl.ignore_ssl_mac_failed:False',
-                                                     '-o', 'ssl.debug_file:' + ssldebuglog,
-                                                     '-x'])
-                except: #maybe an old tshark version, Replace -Y with -R
+
+                #now we have the master secret, execution diverges again between dark and classic mode
+                #for dark mode, we only need to extract the server encryption key
+                #for classic mode, we need to recreate the sslkeylogfile and run tshark again
+                if dark_mode:
+                    #expanded keys needed for encryption key
+                    #derive expanded keys for AES
+                    #need the SR,CR and the cipher suite
+                    with open(os.path.join(commit_dir,'sr'),'rb') as f: sr = f.read()
+                    with open(os.path.join(commit_dir,'cipher_suite'),'rb') as f: cipher_suite = f.read()
+                    label = 'key expansion'
+                    seed = sr + cr
+                    expanded_keys = shared.TLS10PRF(label+seed,req_bytes=120,full_secret = ms)[2]
+                    start,end = (72,104) if cipher_suite=='AES256' else (56,72)
+                    server_enc_key = gexpanded_keys[start:end]
+                    key_size = 32 if cipher_suite == 'AES256' else 16
+                    decrypted_text = shared.aes_decrypt_section(cpt_blocks, server_enc_key, key_size)
+                    with open(os.path.join(decr_dir,'plaintext_fragment'+seqno),'wb') as f:
+                        f.write(decrypted_text)
+
+                else:
+                    sslkeylog = os.path.join(decr_dir, 'sslkeylog'+seqno)
+                    ssldebuglog = os.path.join(decr_dir, 'ssldebuglog'+seqno)
+                    cr_hexl = binascii.hexlify(cr)
+                    ms_hexl = binascii.hexlify(ms)
+                    with open(sslkeylog, 'wb') as f:
+                        f.write('CLIENT_RANDOM ' + cr_hexl + ' ' + ms_hexl + '\n')
                     try: output = subprocess.check_output([tshark_exepath, '-r',
-                                                           os.path.join(auditeetrace_dir, one_trace),
-                                                          '-R', 'ssl and http.content_type contains html',
-                                                          '-o', 'http.ssl.port:1025-65535', 
-                                                          '-o', 'ssl.keylog_file:'+ sslkeylog,
-                                                          '-o', 'ssl.ignore_ssl_mac_failed:False',
-                                                          '-o', 'ssl.debug_file:' + ssldebuglog,
-                                                          '-x'])
-                    except: raise Exception ('Could not launch tshark')
-                if output == '': raise Exception ("Failed to find HTML in escrowtrace")
-                with open(ssldebuglog, 'rb') as f: debugdata = f.read()
-                if debugdata.count('mac failed') > 0:
-                    raise Exception('Mac check failed in tracefile')
-                #output may contain multiple frames with HTML, we examine them one-by-one
-                separator = re.compile('Frame ' + re.escape('(') + '[0-9]{2,7} bytes' + re.escape(')') + ':')
-                #ignore the first split element which is always an empty string
-                frames = re.split(separator, output)[1:]    
-                html_paths = ''
-                for index,oneframe in enumerate(frames):
-                    html = shared.get_html_from_asciidump(oneframe)
-                    path = os.path.join(decr_dir, 'html-'+seqno+'-'+str(index))
-                    with open(path, 'wb') as f: f.write(html)
+                                                        os.path.join(auditeetrace_dir, one_trace),
+                                                         '-Y', 'ssl and http.content_type contains html',
+                                                         '-o', 'http.ssl.port:1025-65535',
+                                                         '-o', 'ssl.keylog_file:'+ sslkeylog,
+                                                         '-o', 'ssl.ignore_ssl_mac_failed:False',
+                                                         '-o', 'ssl.debug_file:' + ssldebuglog,
+                                                         '-x'])
+                    except: #maybe an old tshark version, Replace -Y with -R
+                        try: output = subprocess.check_output([tshark_exepath, '-r',
+                                                               os.path.join(auditeetrace_dir, one_trace),
+                                                              '-R', 'ssl and http.content_type contains html',
+                                                              '-o', 'http.ssl.port:1025-65535',
+                                                              '-o', 'ssl.keylog_file:'+ sslkeylog,
+                                                              '-o', 'ssl.ignore_ssl_mac_failed:False',
+                                                              '-o', 'ssl.debug_file:' + ssldebuglog,
+                                                              '-x'])
+                        except: raise Exception ('Could not launch tshark')
+                    if output == '': raise Exception ("Failed to find HTML in escrowtrace")
+                    with open(ssldebuglog, 'rb') as f: debugdata = f.read()
+                    if debugdata.count('mac failed') > 0:
+                        raise Exception('Mac check failed in tracefile')
+                    #output may contain multiple frames with HTML, we examine them one-by-one
+                    separator = re.compile('Frame ' + re.escape('(') + '[0-9]{2,7} bytes' + re.escape(')') + ':')
+                    #ignore the first split element which is always an empty string
+                    frames = re.split(separator, output)[1:]
+                    html_paths = ''
+                    for index,oneframe in enumerate(frames):
+                        html = shared.get_html_from_asciidump(oneframe)
+                        path = os.path.join(decr_dir, 'html-'+seqno+'-'+str(index))
+                        with open(path, 'wb') as f: f.write(html)
                 #also create a file where the auditor can see the domain and pubkey
                 with open (os.path.join(auditeetrace_dir, 'domain'+seqno), 'rb') as f: domain_data = f.read()
                 with open (os.path.join(commit_dir, 'pubkey'+seqno), 'rb') as f: pubkey_data = f.read()

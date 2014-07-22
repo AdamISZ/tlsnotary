@@ -2,6 +2,7 @@ import math, os, binascii, hmac
 from hashlib import md5, sha1
 from tlsn_common import xor
 from base64 import b64encode,b64decode
+import subprocess
 import rsa
 
 #encrypt and base64 encode
@@ -91,7 +92,93 @@ def TLS10PRF(seed, req_bytes = 48, first_half=None,second_half=None,full_secret=
     return (P_MD5, P_SHA_1, PRF)
 
 
-''' ** TESTING CODE **
+def aes_decrypt_section(ciphertext,server_encryption_key,key_size=16):
+    '''Given ciphertext, an array of integers forming a whole number multiple
+    of blocks (so len(ciphertext) is a multiple of 16),and key server_encryption_key,
+    return conjoined plaintext as a string/char array, which represents the decryption
+    of all but the first block. The key size is either 16 (AES128) or 32 (AES256).
+    '''
+    #sanity checks
+    if len(ciphertext)%16 != 0:
+        raise Exception("Invalid cipher input to AES decryption - incomplete block")
+    if len(ciphertext)<32:
+        raise Exception("Invalid cipher input to AES decryption - insufficient data, should be at least 32 bytes, but was: ",len(ciphertext_blocks)," bytes.")
+
+    #object from slowaes which contains internal decryption algo
+    aes = slowaes.AES()
+
+    #split ciphertext into blocks
+    ciphertext_blocks=zip(*[iter(ciphertext)]*16)
+
+    #implementation of decryption in AES-CBC
+    #Note:
+    decrypted = ''
+
+    #first ciphertext block is used as input; cannot be decrypted
+    iput = ciphertext_blocks[0]
+
+    for block in ciphertext_blocks[1:]:
+        output = aes.decrypt(block, server_encryption_key, key_size)
+        for i in range(16):
+            decrypted += chr(iput[i] ^ output[i])
+        iput = block
+
+    return decrypted
+'''
+#** AES decryption TESTING code **
+if __name__ == "__main__":
+    import sys
+    import os
+    import re
+    datadir = '/home/adam/DevRepos/tlsn23/tlsnotary/data/auditee'
+    sys.path.append(os.path.join(datadir, 'python', 'slowaes'))
+    import slowaes
+    import tlsn_common
+
+    #Test 1: slowaes' decryption vs my decryption for a dummy string
+    #***************************************************************
+    moo = slowaes.AESModeOfOperation()
+    cleartext = "abcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighiabcabcdefdefghighi"
+    cypherkey = [143,194,34,208,145,203,230,143,177,246,97,206,145,92,255,84]
+    iv = [103,35,148,239,76,213,47,118,255,222,123,176,106,134,98,92]
+    mode, orig_len, ciph = moo.encrypt(cleartext, moo.modeOfOperation["CBC"],
+            cypherkey, moo.aes.keySize["SIZE_128"], iv)
+    print "Mode is: ", mode
+    print "ORiginal length is: ", orig_len
+    print "Ciph is: ", ciph
+
+    start_block_num = 3
+    end_block_num = 6
+    ciphertext_blocks=[]
+    for i in range(start_block_num,end_block_num+1):
+        ciphertext_blocks.append(ciph[16*i:16*(i+1)])
+    print "Ciphertext blocks are: ",ciphertext_blocks
+    print "Cypher key is: ", cypherkey
+    decr = moo.decrypt(ciph, orig_len, mode, cypherkey,
+        moo.aes.keySize["SIZE_128"], iv)
+    print "Here's the decryption the old way: ", decr
+    result = aes_decrypt_section(ciph[32:64],cypherkey,moo.aes.keySize["SIZE_128"])
+    print "Here is the final result: ", result
+
+    #Test 2: using real ciphertext blocks from a run on https://pay.reddit.com with AES 256 CBC
+    #/home/adam/DevRepos/tlsn23/tlsnotary/data/auditee/sessions/07-Jul-2014-18-41-57
+    #*******************************************************************************************
+    server_enc_key = '0e 24 58 82 51 e6 9a 20 8e c4 c2 a3 c8 81 d4 e5 2b dc 24 7d 9f 4d e0 96 56 1f 80 ae f5 ea 96 2e'.replace(' ','')
+    byte_key = map(ord,server_enc_key.decode('hex'))
+
+    trace_file = '/home/adam/DevRepos/tlsn24/tlsnotary/data/auditee/sessions/07-Jul-2014-18-41-57/commit/trace1'
+
+    ascii_dump = subprocess.check_output(['tshark', '-r', trace_file, '-Y', 'ssl and not ssl.handshake and frame.number > 2', '-x'])
+
+    cpt = tlsn_common.get_ciphertext_from_asciidump(ascii_dump)
+    print (cpt[0:50])
+    print (cpt[-50:])
+    print (len(cpt))
+    tryout = aes_decrypt_section(cpt[16448:48448],byte_key,moo.aes.keySize["SIZE_256"])
+    print tryout
+'''
+
+''' ** TLS PRF TESTING CODE **
 def new_way(seed,pms1,pms2):
     ms = TLS10PRF('master secret'+seed,full_secret=pms1+pms2)[2]
     return TLS10PRF('key expansion'+seed,req_bytes=20,full_secret=ms)[2]
