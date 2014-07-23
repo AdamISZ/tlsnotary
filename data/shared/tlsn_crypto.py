@@ -5,7 +5,7 @@ from tlsn_common import *
 from base64 import b64encode,b64decode
 from pyasn1.type import univ
 from pyasn1.codec.der import encoder, decoder
-from slowaes import AESModeOfOperation
+import slowaes
 
 #encrypt and base64 encode
 def ee(msg,pubkey):
@@ -19,6 +19,38 @@ def dd(cipher,privkey):
 md5_hash_len = 16
 sha1_hash_len = 20
 
+def aes_decrypt_section(ciphertext,server_encryption_key,key_size=16):
+    '''Given ciphertext, an array of integers forming a whole number multiple
+of blocks (so len(ciphertext) is a multiple of 16),and key server_encryption_key,
+return conjoined plaintext as a string/char array, which represents the decryption
+of all but the first block. The key size is either 16 (AES128) or 32 (AES256).
+'''
+    #sanity checks
+    if len(ciphertext)%16 != 0:
+        raise Exception("Invalid cipher input to AES decryption - incomplete block")
+    if len(ciphertext)<32:
+        raise Exception("Invalid cipher input to AES decryption - insufficient data, should be at least 32 bytes, but was: ",len(ciphertext_blocks)," bytes.")
+
+    #object from slowaes which contains internal decryption algo
+    aes = slowaes.AES()
+
+    #split ciphertext into blocks
+    ciphertext_blocks=zip(*[iter(ciphertext)]*16)
+
+    #implementation of decryption in AES-CBC
+    #Note:
+    decrypted = ''
+
+    #first ciphertext block is used as input; cannot be decrypted
+    iput = ciphertext_blocks[0]
+
+    for block in ciphertext_blocks[1:]:
+        output = aes.decrypt(block, server_encryption_key, key_size)
+        for i in range(16):
+            decrypted += chr(iput[i] ^ output[i])
+        iput = block
+
+    return decrypted
 
 #*********** TLS CODE ********************
 class TLSNSSLClientSession(object):
@@ -170,7 +202,8 @@ class TLSNSSLClientSession(object):
 
         #we can construct the encrypted form if pubkey is known
         if (self.serverModulus):
-            self.encFirstHalfPMS = pow(ba2int('\x02'+('\x01'*63)+os.urandom(15)+'\x00'+\
+            x = '\x01'*15 #os.urandom(15)
+            self.encFirstHalfPMS = pow(ba2int('\x02'+('\x01'*63)+x+'\x00'+\
             pms1+('\x00'*24)) + 1, self.serverExponent, self.serverModulus)
 
         #can construct the full encrypted pre master secret if
@@ -196,7 +229,8 @@ class TLSNSSLClientSession(object):
 
         #we can construct the encrypted form if pubkey is known
         if (self.serverModulus):
-            self.encSecondHalfPMS = pow( int(('\x01'+('\x01'*63)+os.urandom(15)+ \
+            x = '\x01'*15 #os.urandom(15)
+            self.encSecondHalfPMS = pow( int(('\x01'+('\x01'*63)+x+ \
             ('\x00'*25)+pms2).encode('hex'),16), self.serverExponent, self.serverModulus )
 
         return (self.pAuditor,self.encSecondHalfPMS)
@@ -360,7 +394,7 @@ class TLSNSSLClientSession(object):
         #HMAC and AES-encrypt the verify_data
         hmacVerify = hmac.new(self.clientMacKey, '\x00\x00\x00\x00\x00\x00\x00\x00' \
         + '\x16' + '\x03\x01' + '\x00\x10' + '\x14\x00\x00\x0c' + verifyData, sha1).digest()
-        moo = AESModeOfOperation()
+        moo = slowaes.AESModeOfOperation()
         cleartext = '\x14\x00\x00\x0c' + verifyData + hmacVerify
         cleartextList = bigint_to_list(ba2int(cleartext))
         clientEncList =  bigint_to_list(ba2int(self.clientEncKey))

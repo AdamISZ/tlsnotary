@@ -109,10 +109,8 @@ def tlsn_send_msg(data,pk,ackQ,recipient,seq_init=100000,raw=False):
                 try:
                     ack_check = ackQ.get(block=True, timeout=3)
                 except: continue #send again because ack was not received
-                #print ('ack check is: ',ack_check)
                 if not str(tlsn_send_msg.my_seq) == ack_check: continue
                 #else: correct ack received
-                #print ('message was acked')
                 bWasMessageAcked = True
                 break
 
@@ -191,7 +189,6 @@ def tlsn_msg_receiver(my_nick,counterparty_nick,ackQueue,recvQueue,message_heade
         if not eemsg[0].startswith('seq'): continue #wrong format; old server hellos will do this
 
         msg_decrypted = dd(eemsg[1],pk)
-        #print ("decrypted message is: ",msg_decrypted)
         if len(chunks) == 0:
             msg = [msg_decrypted.split(':')[0]] + [':'.join(msg_decrypted.split(':')[1:])]+[eemsg[2]]
         else:
@@ -208,7 +205,9 @@ def tlsn_msg_receiver(my_nick,counterparty_nick,ackQueue,recvQueue,message_heade
 
         #else we got a new seq
         if len(chunks)==0: #a new message is starting
-            if not msg[0].startswith(message_headers) : continue
+            if not msg[0].startswith(message_headers) :
+                print ('received message with invalid header: ',msg[0])
+                continue
             hdr = msg[0]
 
         #'CRLF' is used at the end of the first chunk, 'EOL' is used to show that there are no more chunks

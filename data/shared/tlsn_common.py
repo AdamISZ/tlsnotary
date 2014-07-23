@@ -1,6 +1,8 @@
 from __future__ import print_function
 from ConfigParser import SafeConfigParser
 import os
+import re
+import string
 import threading
 
 #General utility objects used by both auditor and auditee.

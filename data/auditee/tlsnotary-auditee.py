@@ -295,16 +295,17 @@ def get_html_paths():
     shutil.copyfile(join(tracelog_dir, one_trace), tracecopy_path)
     #Remove the data from the auditee to the auditor (except handshake) from the copied
     #trace using editcap. (To address the small possibility of data leakage from request urls)
-    output = check_output([tshark_exepath,'-r',tracecopy_path,'-Y',
+    certificate_data = check_output([tshark_exepath,'-r',tracecopy_path,'-Y',
                                     'ssl.handshake.certificate',
 				    '-o','http.ssl.port:1025-65535',
-				    '-T','fields',
-                                   '-e','tcp.srcport'])
-    if not output:
+                                    '-T','fields','-e','tcp.srcport',
+                                    '-T','fields','-e','frame.number'])
+    certificate_port,certificate_frame = certificate_data.split()
+    if not certificate_port:
         raise Exception("No certificate found in trace.")
     #gather the trace frames which were sent from the same port as the certificate
     output = check_output([tshark_exepath,'-r',tracecopy_path,'-Y',
-                                    'ssl.handshake or tcp.srcport=='+output.strip(),
+                                    'ssl.handshake or tcp.srcport=='+certificate_port,
 				    '-o','http.ssl.port:1025-65535',
                                     '-T','fields','-e','frame.number'])
     if not output:
@@ -320,21 +321,69 @@ def get_html_paths():
     backup_full_trace_path = os.path.join(current_sessiondir, 'backup_trace'+str(len(cr_list)))
     shutil.move(tracecopy_path,backup_full_trace_path)
     shutil.move(trimmed_trace_path,tracecopy_path)    
-      
-    #send the hash of tracefile and md5hmac
-    with open(tracecopy_path, 'rb') as f: data=f.read()
-    commit_hash = sha256(data).digest()
+
+#HASH COMMITMENT PHASE
+    #=====================
+    #The commitment is different depending on whether we use dark mode or classic mode
+    if not tlsnSession.pAuditee: print ("auditee hash is missing")
     md5hmac_hash = sha256(tlsnSession.pAuditee).digest()
-    reply = send_and_recv('commit_hash:'+commit_hash+md5hmac_hash)
+
+    if int(shared.config.get("General","dark")):
+        #extract the ciphertext from the tshark trace file; we must restrict filter to
+        #frames *after* the certificate, because otherwise we can accidentally pick up
+        #HTTP CONNECTs occurring before the handshake
+        ascii_dump = check_output(['tshark', '-r', tracecopy_path, '-Y',
+        'ssl and not ssl.handshake and frame.number > '+str(certificate_frame), '-x'])
+
+        cpt = shared.get_ciphertext_from_asciidump(ascii_dump)
+        #strip any excess bytes after the blocks (TODO is this necessary? why?)
+        truncated = -len(cpt)%16
+        if len(cpt)%16: cpt = cpt[:-truncated]
+
+        #split ciphertext into blocks and store in hex format
+        global ciphertext_blocks
+        ciphertext_blocks=zip(*[iter(cpt)]*16)
+        ciphertext_blocks = [binascii.hexlify(bytearray(x)) for x in ciphertext_blocks]
+        #write out the ciphertext blocks to a file for later reveal phase
+        with open(join(commit_dir,'ciphertext_blocks'+str(len(cr_list))),'wb') as f:
+            f.writelines("%s\n" % x for x in ciphertext_blocks)
+
+        cpt_hashes = [binascii.hexlify(sha256(x).digest()) for x in ciphertext_blocks]
+        cpt_hashes_file = join(commit_dir,'cpt_hashes'+str(len(cr_list)))
+        with open(cpt_hashes_file,'wb') as f: f.write('\n'.join(cpt_hashes))
+        try: link = sendspace_getlink(cpt_hashes_file)
+        except:
+            print ('sendspace failed, trying pipebytes')
+            try: link = pipebytes_getlink(cpt_hashes_file)
+            except: return 'failure'
+        j = md5hmac_hash+str(link)
+        q = 'commit_hash:1'+j
+        reply = send_and_recv(q)
+
+    else:
+        #send the hash of tracefile and md5hmac
+        with open(tracecopy_path, 'rb') as f: data=f.read()
+        commit_hash = sha256(data).digest()
+        reply = send_and_recv('commit_hash:0'+commit_hash+md5hmac_hash)
+
+    #whatever commitment was made (i.e. for either mode),
+    #we expect receipt of the sha1hmac which will allow reconstruction
+    #of the master secret
     if reply[0] != 'success': raise Exception ('Failed to receive a reply')
     if not reply[1].startswith('sha1hmac_for_MS:'):
         raise Exception ('bad reply. Expected sha1hmac_for_MS')
     sha1hmac_for_MS = reply[1][len('sha1hmac_for_MS:'):]
 
+    #LOCAL DECRYPTION PHASE
+    #=====================
+    #Now the auditor has received the appropriate commitment
+    #depending on the mode, we are ready to do local decryption
+
+
     #construct MS
     ms = shared.xor(tlsnSession.pAuditee, sha1hmac_for_MS)[:48]
     sslkeylog = join(commit_dir, 'sslkeylog' + str(len(cr_list)))
-    ssldebuglog = join(commit_dir, 'ssldebuglog' + str(len(cr_list)))    
+    ssldebuglog = join(commit_dir, 'ssldebuglog' + str(len(cr_list)))
     cr_hexl = binascii.hexlify(cr)
     ms_hexl = binascii.hexlify(ms)
     skl_fd = open(sslkeylog, 'wb')
@@ -343,15 +392,15 @@ def get_html_paths():
     #use tshark to extract HTML
     try: output = check_output([tshark_exepath, '-r', tracecopy_path,
                                           '-Y', 'ssl and http.content_type contains html',
-                                          '-o', 'http.ssl.port:1025-65535', 
+                                          '-o', 'http.ssl.port:1025-65535',
                                           '-o', 'ssl.keylog_file:'+ sslkeylog,
                                           '-o', 'ssl.ignore_ssl_mac_failed:False',
                                           '-o', 'ssl.debug_file:' + ssldebuglog,
                                           '-x'])
     except: #maybe this is an old tshark version, change -Y to -R
         try: output = check_output([tshark_exepath, '-r', tracecopy_path,
-                                              '-R', 'ssl and http.content_type contains html', 
-                                               '-o', 'http.ssl.port:1025-65535', 
+                                              '-R', 'ssl and http.content_type contains html',
+                                               '-o', 'http.ssl.port:1025-65535',
                                                '-o', 'ssl.keylog_file:'+ sslkeylog,
                                                '-o', 'ssl.ignore_ssl_mac_failed:False',
                                                '-o', 'ssl.debug_file:' + ssldebuglog,
@@ -363,7 +412,7 @@ def get_html_paths():
     #output may contain multiple frames with HTML, we examine them one-by-one
     separator = re.compile('Frame ' + re.escape('(') + '[0-9]{2,7} bytes' + re.escape(')') + ':')
     #ignore the first split element which is always an empty string
-    frames = re.split(separator, output)[1:]    
+    frames = re.split(separator, output)[1:]
     html_paths = ''
     for index,oneframe in enumerate(frames):
         html = shared.get_html_from_asciidump(oneframe)
@@ -372,7 +421,7 @@ def get_html_paths():
         html_paths += path + '&'
     global get_html_paths_retval
     get_html_paths_retval = ('success',html_paths)
-    return get_html_paths_retval 
+    return get_html_paths_retval
 
 def send_link(filelink):
     reply = send_and_recv('link:'+filelink)
@@ -423,7 +472,7 @@ def prepare_pms():
         tlssock.close()
         if not response.count(googleSession.handshakeMessages[5]):
             #the response did not contain ccs == error alert received
-            print ("Response was: ")
+            print ("Attempt failed, response was: ")
             print (binascii.hexlify(response))
             continue
         #else ccs was in the response
@@ -437,12 +486,14 @@ def prepare_pms():
 #send a message and return the response received
 def send_and_recv (data):
     if not ('success' == shared.tlsn_send_msg(data,auditorPubKey,ackQueue,auditor_nick,seq_init=None)):
+        print ('send tlsn message failure')
         return ('failure','')
     #receive a response (these are collected into the recvQueue by the receiving thread)
     for i in range(3):
         try: onemsg = recvQueue.get(block=True, timeout=5)
         except:  continue #try to receive again
         return ('success', onemsg)
+    print ('Didnt get a response to tlsn message sent')
     return ('failure', '')
 
 def sendspace_getlink(mfile):
@@ -472,6 +523,7 @@ def sendspace_getlink(mfile):
     dl_start = dl_req.text.find('"download_button" href="') + len('"download_button" href="')
     dl_len = dl_req.text[dl_start:].find('"')
     dl_link = dl_req.text[dl_start:dl_start+dl_len]
+    print ('from sendspace, returning the link: ',dl_link)
     return dl_link
 
 
@@ -497,19 +549,46 @@ def pipebytes_getlink(mfile):
 
 def stop_recording():
     os.kill(stcppipe_proc.pid, signal.SIGTERM)
-    #trace* files in committed dir is what auditor needs
+
+    #REVEAL PHASE
+    #We provide to the auditor:
+    #md5hmac - to allow reconstruction of master secret
+    #domain - to verify pubkey
+    #for classic mode: network trace file generated by stcppipe
+    #for dark mode: a set of ciphertext blocks for decryption
+
     tracedir = join(current_sessiondir, 'mytrace')
     os.makedirs(tracedir)
-    zipf = zipfile.ZipFile(join(tracedir, 'mytrace.zip'), 'w')
     commit_dir = join(current_sessiondir, 'commit')
-    com_dir_files = os.listdir(commit_dir)
-    for onefile in com_dir_files:
-        if not onefile.startswith(('trace', 'md5hmac', 'domain')): continue
-        zipf.write(join(commit_dir, onefile), onefile)
+    zipf = zipfile.ZipFile(join(tracedir, 'mytrace.zip'), 'w')
+
+    if not int(shared.config.get('General','dark')):
+        #trace* files in committed dir is what auditor needs for classic mode
+        com_dir_files = os.listdir(commit_dir)
+        for onefile in com_dir_files:
+            if not onefile.startswith(('trace', 'md5hmac', 'domain')): continue
+            zipf.write(join(commit_dir, onefile), onefile)
+
+    else:
+        #TODO Need user interface functionality to (a) show plain html (b)user selects text (c) convert to ciphertext blocks
+        #for now, just an example: blocks 11-20 will be decrypted.
+        #ciphertext reveal file - this will contain the hex of the specific subset of
+        #ciphertexts the user chose to reveal, and that file will be sent to the auditor
+        #(over sendspace or can we get away with IRC/underlying messaging?)
+        crf = join(commit_dir,'ciphertext_reveal1') #hack - TODO make valid for multiple audits
+        with open(crf,'wb') as f: f.writelines("%s\n" % x for x in ciphertext_blocks[211:240])
+        #we bundle up: md5hmac (so auditor can construct MS and thus extract enc key),
+        #ciphertext reveal file, and domain file
+        com_dir_files = os.listdir(commit_dir)
+        for onefile in com_dir_files:
+            if not onefile.startswith(('ciphertext_reveal', 'md5hmac', 'domain')): continue
+            zipf.write(join(commit_dir, onefile), onefile)
+
     zipf.close()
-    try: link = sendspace_getlink(join(tracedir, 'mytrace.zip'))
+    link_file = join(tracedir, 'mytrace.zip')
+    try: link = sendspace_getlink(link_file)
     except:
-        try: link = pipebytes_getlink(join(tracedir, 'mytrace.zip'))
+        try: link = pipebytes_getlink(link_file)
         except: return 'failure'
     return send_link(link)
        
@@ -688,8 +767,9 @@ def tcpproxy_new_connection_thread(socket_browser, socket_stcppipe):
                     continue                    
             except Exception, e:
                 print('exception in tcpproxy', e)
-                shutdown_sockets([socket_browser])                
-                return
+                shutdown_sockets([socket_browser])
+                raise
+                #return
 
 
 def httpsproxy_new_connection_thread(socket_stcppipe_out):
@@ -992,7 +1072,8 @@ def start_firefox(FF_to_backend_port):
         f.writelines([
         'user_pref("browser.startup.homepage", "chrome://tlsnotary/content/auditee.html");\n',
         'user_pref("browser.startup.homepage_override.mstone", "ignore");\n', #prevents welcome page
-        'user_pref("browser.rights.3.shown", true);\n', 
+        'user_pref("browser.rights.3.shown", true);\n',
+        'user_pref("network.http.accept-encoding",\'\');\n',
         'user_pref("app.update.auto", false);\n',
         'user_pref("app.update.enabled", false);\n',
         'user_pref("browser.shell.checkDefaultBrowser", false);\n',
